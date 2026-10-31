@@ -12,10 +12,24 @@ No Agents API, custom reasoning loop, remote shell endpoint, AWS command-executi
 
 - A one-time build uses private S3 artifacts to produce a reusable image containing Python, Git, `gh`, pinned Linux ARM64 Codex, and the selected repository's toolchain.
 - The port-8080 lifecycle/worker server initializes one job, starts Codex asynchronously, streams command/test output to CloudWatch and exposes `/status`; no separate worker deadline is implemented. AWS lifecycle hooks start/stop it; Codex shell tools execute locally inside the VM.
-- The worker retrieves one Secrets Manager runtime-credentials secret containing model and GitHub credentials. Supply `CODEX_API_KEY` and `GH_TOKEN` at runtime; configure Git authentication with `gh auth setup-git`. Codex calls OpenAI directly and publishes to GitHub.
+- The worker retrieves only the GitHub token from one Secrets Manager runtime-credentials secret. Supply `GH_TOKEN` at runtime and configure Git authentication with `gh auth setup-git`. Codex calls Amazon Bedrock directly using the MicroVM execution role and publishes to GitHub; no OpenAI API key or inference proxy is needed.
 - Step Functions Standard uses direct AWS SDK lifecycle/token integrations and `arn:aws:states:::http:invoke` for authenticated HTTPS polling through AWS-managed ingress and internet-egress connectors. Auth tokens are restricted to port 8080.
 - HTTP Tasks require one EventBridge connection. Use a non-conflicting API-key header such as `X-Poc-Connection` with a static marker the worker ignores. Actual authentication is dynamic JWE header `X-aws-proxy-auth`; connection headers override HTTP Task headers, so never configure that header in the connection.
 - Status is pending while work continues, then exactly one terminal response: `{"ok": true}` only after passing tests and confirmed PR creation, otherwise `{"error": "cause"}` for unrecoverable failure. VM termination can interrupt the worker without a terminal response. HTTP 200 or successful process exit alone is insufficient. No logs, diff, SHA, PR URL, or token-usage artifacts need returning or local storage; logs stay in CloudWatch and published work in GitHub.
+
+### Direct Bedrock inference
+
+Use `us-east-1` for the PoC resources and Bedrock source Region. Package this configuration with the pinned Codex CLI:
+
+```toml
+model_provider = "amazon-bedrock-runtime"
+model = "us.openai.gpt-6.1-sol"
+web_search = "disabled"
+```
+
+Set `AWS_REGION=us-east-1` at runtime. The native provider uses `https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1` and the AWS SDK credential chain for execution-role credentials. Do not supply `CODEX_API_KEY`, `OPENAI_API_KEY`, or `AWS_BEARER_TOKEN_BEDROCK`; the latter overrides AWS credential authentication. Verify credential discovery and refresh in Gate 1.
+
+The `us.` profile routes within the United States, not necessarily only `us-east-1`. Hosted web search is unavailable on Runtime. Codex's local tool loop and Step Functions orchestration remain unchanged.
 
 ## Implementation phases
 
@@ -25,29 +39,29 @@ Do not create Step Functions or its EventBridge connection until the real task s
 
 #### 1. Confirm demonstration inputs
 
-Confirm one repository and pinned base SHA; a small, objectively testable source/test task (not deployment configuration); existing setup/test commands; a model available to the API project; permission to push a dedicated branch/create a PR inside the VM; and permission to expose repository content to the model provider. Propose a small repository with existing automated tests. Its GitHub token needs repository access plus contents and pull-request write permissions.
+Confirm one repository and pinned base SHA; a small, objectively testable source/test task (not deployment configuration); existing setup/test commands; access to `us.openai.gpt-6.1-sol` through Bedrock in `us-east-1` using the runtime role; permission to push a dedicated branch/create a PR inside the VM; and permission to expose repository content to the model provider. Propose a small repository with existing automated tests. Its GitHub token needs repository access plus contents and pull-request write permissions.
 
 Run baseline tests first. Record the base SHA, baseline outcome, and expected acceptance test to distinguish existing failures from agent failures.
 
 #### 2. Create execution resources and inspect permissions
 
-Proposed Gate 1 resources: one private S3 artifact bucket in `eu-central-1`, one image build role, one runtime execution role, one runtime-credentials secret, one CloudWatch log group for image/worker logs, and one reusable image. Defer orchestration permissions and the Step Functions execution role until Gate 2.
+Proposed Gate 1 resources: one private S3 artifact bucket in `us-east-1`, one image build role, one runtime execution role, one runtime-credentials secret containing only the GitHub token, one CloudWatch log group for image/worker logs, and one reusable image. Defer orchestration permissions and the Step Functions execution role until Gate 2.
 
 | Principal | Required access |
 |---|---|
 | Build role | `s3:GetObject` on the image artifact; CloudWatch log creation/writes |
-| Runtime execution role | CloudWatch log writes; `secretsmanager:GetSecretValue` on only the runtime-credentials secret |
+| Runtime execution role | CloudWatch log writes; `secretsmanager:GetSecretValue` on only the runtime-credentials secret; `bedrock:InvokeModel` and `bedrock:InvokeModelWithResponseStream` scoped to the selected inference profile, its destination foundation models, and the account's default Bedrock project |
 | Provisioning identity | Resource setup; image creation/inspection/deletion; state-machine and EventBridge connection deployment; `iam:PassRole` for their specific roles |
 | Step Functions execution role (Gate 2) | `lambda:RunMicrovm`, `lambda:GetMicrovm`, `lambda:CreateMicrovmAuthToken`, `lambda:TerminateMicrovm`; `iam:PassRole` for the MicroVM execution role; `states:InvokeHTTPEndpoint` for workflow GET status requests; `events:RetrieveConnectionCredentials` on the connection; `secretsmanager:GetSecretValue` and `secretsmanager:DescribeSecret` on its managed connection secret |
 | Operator using supplied AWS profile | Gate 1: manual launch, inspection, token creation, termination, log reads, and `iam:PassRole` for the runtime execution role. Gate 2: `states:StartExecution`, `states:DescribeExecution`, execution-history/log reads; retain manual recovery access. |
 
-Build/runtime roles require the documented Lambda trust policy allowing `sts:AssumeRole` and `sts:TagSession`; the Gate 2 role trusts `states.amazonaws.com`. Add KMS decryption only for a customer-managed key. Never copy the administrator profile/credentials into the image. Verify policies, trust relationships, and scoped artifact, secret, and log access.
+Build/runtime roles require the documented Lambda trust policy allowing `sts:AssumeRole` and `sts:TagSession`; the Gate 2 role trusts `states.amazonaws.com`. Add KMS decryption only for a customer-managed key. Never copy the administrator profile/credentials into the image. Verify policies, trust relationships, and scoped artifact, GitHub secret, log, and Bedrock access across all profile destination Regions. Local administrator access does not prove runtime-role access.
 
 #### 3. Prepare a snapshot-safe image; build after Step 4
 
-Use container base `public.ecr.aws/lambda/microvms:al2023-minimal` for its documented snapshot-compatible OpenSSL libraries and managed base image `arn:aws:lambda:eu-central-1:aws:microvm-image:al2023-1`. The installed CLI accepts only `ARM_64`; all binaries/tooling must be compatible.
+Use container base `public.ecr.aws/lambda/microvms:al2023-minimal` for its documented snapshot-compatible OpenSSL libraries and managed base image `arn:aws:lambda:us-east-1:aws:microvm-image:al2023-1`. The installed CLI accepts only `ARM_64`; all binaries/tooling must be compatible.
 
-Proposed sizing: **2 GB / 1 vCPU baseline**, bursting automatically to **8 GB / 4 vCPU**, with **8 GB maximum disk space**. Disk does not grow with compute bursting. Package pinned Codex, `gh`, Git, required toolchain, Python server, and an empty writable workspace; exclude credentials, model keys, task identifiers, and live external connections.
+Proposed sizing: **2 GB / 1 vCPU baseline**, bursting automatically to **8 GB / 4 vCPU**, with **8 GB maximum disk space**. Disk does not grow with compute bursting. Package pinned Codex with native `amazon-bedrock-runtime` support and the configuration above, `gh`, Git, required toolchain, Python server, and an empty writable workspace; exclude credentials, model keys, task identifiers, and live external connections.
 
 | Hook | Proposed behavior |
 |---|---|
@@ -62,7 +76,7 @@ Clone repositories and call the model asynchronously in the worker, not synchron
 
 Both manual launch and Step Functions use this server's `/run`; do not create a separate feasibility runner.
 
-1. Retrieve runtime credentials and configure `gh auth setup-git`.
+1. Retrieve only the GitHub token and configure `gh auth setup-git`. Set `AWS_REGION=us-east-1`; let Codex resolve execution-role credentials for Bedrock without retrieving or injecting a model API key.
 2. Clone the approved repository, check out the pinned base SHA, create a unique task branch, and install declared dependencies.
 3. Start Codex once with the task and instructions to edit source, run approved tests, inspect/fix failures, and repeat until tests pass, an unrecoverable failure occurs, or the VM is terminated. Stream JSONL events and stderr to CloudWatch.
 4. After the final test command passes with a nonempty change, the same agent commits, runs `git push`, and runs `gh pr create` against the selected base branch. It must not merge.
@@ -75,7 +89,8 @@ Supply structured job data in `runHookPayload`, never an interpolated shell comm
 Launch one VM with AWS CLI using the pinned image, runtime role, managed connectors, and structured `runHookPayload`. Apply the proposed 30-minute lifespan and idle policy specified below.
 
 - Retain its ID for recovery if the terminal closes, wait for `RUNNING`, create one port-8080 token, and request `/status` over HTTPS directly, without Step Functions/EventBridge.
-- Confirm the same worker runs unattended Codex in the intended sandbox, runtime credentials/repository setup/model access work, and meaningful source changes result. Record the passing test command and exit code; verify agent-side commit, push, PR creation, CloudWatch output, and terminal response. Observed test-failure repair is not required.
+- Confirm the same worker runs Codex with `amazon-bedrock-runtime` and `us.openai.gpt-6.1-sol`. Before coding/publication, verify runtime-role Bedrock access and harmless local shell-tool execution in the intended sandbox without approval prompts. These are early Gate 1 checks, not separate prerequisites; stop rather than changing provider/model or disabling the sandbox if they fail. Then verify repository setup and GitHub authentication.
+- Confirm meaningful source changes, record the passing test command and exit code, and verify agent-side commit, push, PR creation, CloudWatch output, and terminal response. Observed test-failure repair is not required.
 - Manually terminate on success or failure; use `get-microvm` to confirm `TERMINATED`. Record VM ID and outcomes locally, keeping logs in CloudWatch and changes in GitHub.
 
 Stop if execution, publication, or termination fails. A generic child-process smoke test does not satisfy Gate 1.
@@ -113,7 +128,7 @@ Call `RunMicrovm` with idle policy `{"maxIdleDurationSeconds":3600,"suspendedDur
 
 ```bash
 PROFILE=AWSAdministratorAccess-172318459814
-REGION=eu-central-1
+REGION=us-east-1
 
 aws stepfunctions start-execution \
   --profile "$PROFILE" --region "$REGION" \
@@ -133,7 +148,7 @@ aws lambda-microvms terminate-microvm \
 ## Risks and constraints
 
 - Build/runtime compatibility is unproven: smoke-test ARM64 binaries, sandbox, and repository toolchain. Start small; increase baseline only if measurements justify it. Measure launch latency; cloning, dependency setup, model calls, and tests will likely dominate duration.
-- VM code can misuse model/GitHub credentials. Use a controlled repository and repository-restricted token. This accepted PoC trade-off is not safe for arbitrary hostile repositories.
+- VM code can misuse execution-role permissions and the GitHub token. Scope Bedrock access to the selected profile/models and default project, and secret access to the GitHub token only. Use a controlled repository and repository-restricted token. This accepted PoC trade-off is not safe for arbitrary hostile repositories.
 - Termination destroys workspace state. Publish before reporting success; failed runs retain only available CloudWatch logs, with no local workspace recovery.
 - Tests do not prove correctness: record actual exit codes, inspect diffs for weakened tests, and require human PR review before merging.
 - Resource/time limits may interrupt work. Aborted/timed-out workflows rely on hard lifespan or manual termination, not automatic Step Functions cleanup.
@@ -144,7 +159,7 @@ aws lambda-microvms terminate-microvm \
 Gate 1 establishes execution feasibility; final success requires Gate 2. One submitted task must:
 
 - Manually start through `StartExecution`, continue without a local controller, and launch exactly one VM from a pinned image.
-- Run agent edits, shell commands, and tests inside that VM; record a passing command/exit code. Preserve Codex's edit–test–fix loop, without requiring observed failure repair.
+- Run Codex with `amazon-bedrock-runtime` and `us.openai.gpt-6.1-sol` using execution-role credentials; run edits, shell commands, and tests inside that VM and record a passing command/exit code. Preserve Codex's edit–test–fix loop, without requiring observed failure repair.
 - Create a commit descended from submitted base SHA and have the agent publish one task branch/PR using `git push` and `gh pr create` inside the VM, without merging.
 - Keep logs in CloudWatch and changes in GitHub; return only `{"ok": true}` as worker terminal success, without downloading artifacts.
 - Reuse the auth token across status polls, terminate the VM, confirm `TERMINATED`, and finish in `Succeed`.
@@ -156,6 +171,10 @@ Additional verification:
 - **Small negative-path tests where practical:** stub/simulate worker setup/process failures; missing/invalid terminal responses; workflow HTTP errors and cleanup routing. Verify configured overall workflow timeout; where practical, simulate a persistently pending worker and confirm `TIMED_OUT` without cleanup or a worker terminal response.
 - **Deferred live demonstrations:** invalid credentials, unresolved test failures, missing/invalid endpoint authentication, connection failures, stopped executions, and terminal closure. This does not defer authentication/failure handling: recoverable tests stay in Codex's loop, catchable workflow/HTTP errors terminate and fail, and aborts/overall timeouts rely on lifespan.
 
-Read-only checks on **2026-10-30**, profile `AWSAdministratorAccess-172318459814`, covered AWS identity, image discovery, quotas, resource listings, pricing, CLI help/schema, official documentation, and `validate-state-machine-definition` for all four lifecycle/auth integration ARNs plus token generation/direct HTTP polling. Definition validation passed with an EventBridge connection and failed without one. No state machine/connection was created or live HTTP request executed; image creation, Codex execution, end-to-end orchestration, and OpenAI/GitHub access remain untested. No application code or AWS resources changed during planning. Implementation requires approval of remaining proposals and demonstration inputs.
+Read-only checks on **2026-10-30**, profile `AWSAdministratorAccess-172318459814`, covered AWS identity, image discovery, quotas, resource listings, pricing, CLI help/schema, official documentation, and `validate-state-machine-definition` for all four lifecycle/auth integration ARNs plus token generation/direct HTTP polling. Definition validation passed with an EventBridge connection and failed without one. No state machine/connection was created or live MicroVM status request executed.
 
-References: [networking](../../aws-lambda-microvms/microvms-networking.md), [security](../../aws-lambda-microvms/microvms-security.md), [images/sizing](../../aws-lambda-microvms/microvms-images.md), [snapshots](../../aws-lambda-microvms/microvms-images-snapshots.md), [Codex non-interactive execution](https://learn.chatgpt.com/docs/non-interactive-mode), [Step Functions SDK integrations](https://docs.aws.amazon.com/step-functions/latest/dg/supported-services-awssdk.html), [HTTP Tasks/connections](https://docs.aws.amazon.com/step-functions/latest/dg/call-https-apis.html).
+Subsequent Bedrock checks confirmed GPT-6.1 Sol authorization, agreement, entitlement, and regional availability for the local AWS identity in `us-east-1`, and an active `us.openai.gpt-6.1-sol` profile. A direct IAM-authenticated Responses API test using **Astra, not the selected PoC model**, passed streaming function-call generation and a tool-result follow-up: HTTP 200 for both calls, 1.41/1.18 seconds, 203 total tokens, and `store=false`. This proves API feasibility only. GPT-6.1 Sol inference, actual Codex execution, and MicroVM runtime-role/sandbox compatibility remain Gate 1 checks.
+
+Image creation, end-to-end orchestration, and GitHub access also remain untested. No application code or AWS resources changed during planning. Implementation requires approval of remaining proposals and demonstration inputs.
+
+References: [Codex direct Bedrock configuration](https://developers.openai.com/codex/amazon-bedrock), [Bedrock Responses API](https://docs.aws.amazon.com/bedrock/latest/userguide/bedrock-mantle.html), [networking](../../aws-lambda-microvms/microvms-networking.md), [security](../../aws-lambda-microvms/microvms-security.md), [images/sizing](../../aws-lambda-microvms/microvms-images.md), [snapshots](../../aws-lambda-microvms/microvms-images-snapshots.md), [Codex non-interactive execution](https://learn.chatgpt.com/docs/non-interactive-mode), [Step Functions SDK integrations](https://docs.aws.amazon.com/step-functions/latest/dg/supported-services-awssdk.html), [HTTP Tasks/connections](https://docs.aws.amazon.com/step-functions/latest/dg/call-https-apis.html).
