@@ -1,38 +1,40 @@
 # AWS Lambda MicroVM Software Factory PoC
 
+**Status:** Proposed, not implemented. Live end-to-end execution remains unverified.
+
 ## What it does
 
-This proposed service turns a coding task into a GitHub pull request. It runs Codex in a temporary, isolated MicroVM, where the agent edits code, runs tests, and publishes its work for human review.
-
-For this PoC, the operator runs one task at a time. The service does not merge pull requests.
+The service turns a small coding task into a tested GitHub pull request. It runs Codex in an isolated AWS Lambda MicroVM—a temporary virtual machine—and shuts the machine down when the job finishes. A human reviews and merges the PR.
 
 ## Main workflow
 
-1. **Submit a task.** Provide a GitHub repository, a specific starting commit, and a small coding task with clear test expectations.
-2. **Start the workspace.** Step Functions launches a MicroVM from a reusable image containing Codex and the repository's development tools.
-3. **Prepare the repository.** The worker clones the repository, checks out the starting commit, creates a task branch, and installs dependencies.
-4. **Do the work.** One Codex session uses Amazon Bedrock to edit code, run tests, and fix failures until the tests pass.
-5. **Publish the result.** Codex commits the changes, pushes the branch, and opens a GitHub pull request. Success requires passing tests and confirmed PR creation—not just a successful agent exit.
-6. **Finish and clean up.** Step Functions polls the worker's status, terminates the MicroVM when the work finishes, confirms termination, and reports the outcome.
+1. **Submit a task.** The operator manually starts an AWS Step Functions workflow with a GitHub repository, a pinned starting commit, and a task.
+2. **Start the workspace.** Step Functions launches one MicroVM from a reusable image containing Codex and the repository’s development tools.
+3. **Prepare the repository.** The worker inside the VM retrieves the GitHub token, clones the repository, checks out the starting commit, creates a task branch, and installs dependencies.
+4. **Implement and test.** One Codex invocation edits the code, runs the approved tests, and fixes failures until the tests pass. Codex uses Amazon Bedrock for model inference; all edits, shell commands, and tests run inside the VM.
+5. **Publish the result.** After passing tests with an actual code change, Codex commits, pushes the branch, and creates a GitHub PR. It does not merge it.
+6. **Finish and clean up.** Step Functions polls the worker’s HTTPS status endpoint while the task runs. Once tests pass and PR creation is confirmed, the worker reports success. Step Functions terminates the VM, confirms shutdown, and completes successfully.
 
-Logs stay in CloudWatch; code changes stay in GitHub. No local controller or artifact download is needed.
+```text
+Task → Step Functions → MicroVM: clone → code → test → create PR
+                  ↓
+          Confirm result → shut down VM
+```
 
-## Who does what
+## Where things live
 
-- **Codex** owns the edit–test–fix loop and publishes the PR from inside the MicroVM.
-- **The worker** prepares the workspace, starts Codex, and reports status.
-- **Step Functions** manages the MicroVM lifecycle and checks progress. It does not run a second agent loop or restart the task.
-- **A developer** reviews the PR before merging.
+- **GitHub:** source repository, task branch, and PR.
+- **CloudWatch:** execution logs.
+- **Secrets Manager:** GitHub token, retrieved only at runtime.
+- **Amazon Bedrock:** the selected GPT-6.1 Sol model, accessed using the VM’s AWS role rather than a model API key.
 
-## Prove it in two stages
+Step Functions manages the VM, not the coding loop. No local controller needs to stay running. The worker reports only success or an error; code and logs remain in GitHub and CloudWatch.
 
-1. **Manual proof:** Launch a MicroVM and complete a real coding task. Verify passing tests, PR creation, logs, and termination.
-2. **Managed workflow:** Only after the manual proof succeeds, use Step Functions to run the same image and worker end to end.
+## Proving the PoC
 
-The image contains tools, not credentials. The worker retrieves a restricted GitHub token at runtime and uses its AWS role for Bedrock access.
+1. **Prove execution first:** manually launch the VM, complete a real coding task through PR creation, and confirm shutdown.
+2. **Add orchestration:** reuse the same image and worker with Step Functions, then demonstrate the full workflow and basic failure cleanup.
 
-## Current status
+Use one controlled repository and run one task at a time. Credentials must be restricted to the required resources. A maximum VM lifespan limits resource use if orchestration stops unexpectedly.
 
-This is a plan, not a working service. Some AWS and API checks have passed, but actual Codex execution, MicroVM compatibility, GitHub publication, and the full workflow remain untested. Demonstration inputs and remaining resource choices still need approval.
-
-For implementation details, permissions, limits, and verification steps, see the [detailed plan](../aws-lambda-microvm-software-factory-poc.md).
+See the [original plan](../aws-lambda-microvm-software-factory-poc.md) for implementation details, remaining proposals, and verification requirements.
