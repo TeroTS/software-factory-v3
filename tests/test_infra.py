@@ -31,6 +31,8 @@ class InfrastructureTests(unittest.TestCase):
         self.image_template = Template.from_stack(self.image)
         self.workflow_template = Template.from_stack(self.workflow)
 
+    # Confirms the application entry point produces a local assembly, preserving
+    # credential-free synthesis for reviewing infrastructure before deployment.
     def test_application_synthesizes_three_native_stacks_without_aws_lookups(self):
         from infra.app import main
 
@@ -39,6 +41,8 @@ class InfrastructureTests(unittest.TestCase):
             main()
         self.assertTrue((entry / "manifest.json").is_file())
 
+    # Checks private artifact storage and the native ARM64 image configuration,
+    # protecting the approved Gate 2 design from custom providers or helper Lambdas.
     def test_native_image_full_configuration_and_private_artifacts(self):
         Template.from_stack(self.artifacts).has_resource_properties(
             "AWS::S3::Bucket",
@@ -110,6 +114,8 @@ class InfrastructureTests(unittest.TestCase):
                 )
             )
 
+    # Ensures synthesized cleanup preserves workflow state after a termination
+    # request, so the VM ID remains available for confirming actual termination.
     def test_synthesized_termination_retains_vm_id_for_confirmation(self):
         resource = next(
             iter(
@@ -132,6 +138,8 @@ class InfrastructureTests(unittest.TestCase):
             deployed["States"]["Terminate"].get("ResultPath"), "$.terminationRequest"
         )
 
+    # Requires an operator-supplied image pin and a non-auth-overriding connection,
+    # while keeping orchestration permissions free of administrator/history access.
     def test_workflow_requires_explicit_pin_and_marker_only_connection(self):
         template = self.workflow_template.to_json()
         self.assertNotIn("Default", template["Parameters"]["ImageVersion"])
@@ -170,6 +178,8 @@ class InfrastructureTests(unittest.TestCase):
         self.assertNotIn("AdministratorAccess", text)
         self.assertNotIn("states:GetExecutionHistory", text)
 
+    # Checks Lambda role trust and bounded secret/model permissions without creating
+    # a replacement secret, protecting scoped runtime access and secret preservation.
     def test_runtime_trust_and_secret_model_scope(self):
         template = self.image_template.to_json()
         roles = self.image_template.find_resources("AWS::IAM::Role")

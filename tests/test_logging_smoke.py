@@ -10,6 +10,8 @@ from unittest.mock import patch
 
 
 class LoggingSmokeTest(unittest.TestCase):
+    # Ensures the bootstrap enables INFO output even from a WARNING-level logger,
+    # keeping the documented local logging check visible on stderr.
     def test_info_message_is_written_to_stderr(self):
         output = io.StringIO()
         root = logging.getLogger()

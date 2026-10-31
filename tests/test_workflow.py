@@ -146,6 +146,8 @@ class WorkflowTests(unittest.TestCase):
             "Confirm": [{"State": "TERMINATING"}, {"State": "TERMINATED"}],
         }
 
+    # Rejects missing or unusable VM IDs with ASL wildcard semantics, preventing
+    # shell-glob assumptions from misrouting cleanup in the local simulation.
     def test_known_vm_string_guard_matches_actual_asl_not_shell_globs(self):
         rule = self.definition["States"]["KnownVM"]["Choices"][0]
         self.assertTrue(choice(rule, {"vm": {"MicrovmId": "microvm-real"}}, {}))
@@ -160,6 +162,8 @@ class WorkflowTests(unittest.TestCase):
             )
         )
 
+    # Completes one bounded job with authenticated polling and confirmed termination,
+    # protecting single-launch/token reuse and secret-free successful output.
     def test_success_reuses_one_token_and_confirms_cleanup(self):
         kind, output, calls, _ = simulate(self.definition, self.replies)
         self.assertEqual(kind, "Succeed")
@@ -183,6 +187,8 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(self.definition["States"]["Poll"]["TimeoutSeconds"], 10)
         self.assertEqual(self.definition["States"]["PendingWait"]["Seconds"], 30)
 
+    # Routes malformed status, worker errors, and failed HTTP requests through cleanup,
+    # preventing HTTP 200 alone from becoming success or exposing the auth token.
     def test_bad_status_and_http_errors_share_cleanup(self):
         for body in (
             {},
@@ -208,6 +214,8 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(kind, "Fail")
             self.assertIn("Confirm", [name for name, _ in calls])
 
+    # Fails unusable image or launch responses without issuing termination when
+    # no VM ID is known, avoiding cleanup against an unidentified resource.
     def test_prelaunch_failures_do_not_cleanup_unknown_vm(self):
         for state, reply in (
             ("Launch", TaskError()),
@@ -220,6 +228,8 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(kind, "Fail")
             self.assertNotIn("Terminate", [name for name, _ in calls])
 
+    # Cleans up a known VM when its endpoint, readiness, or authentication fails,
+    # ensuring catchable post-launch failures cannot bypass termination or succeed.
     def test_postlaunch_failures_never_succeed(self):
         for state, reply in (
             ("Launch", {"MicrovmId": "microvm-test"}),
@@ -234,6 +244,8 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(kind, "Fail")
             self.assertIn("Terminate", [name for name, _ in calls])
 
+    # Reports cleanup failure if termination or confirmation errors, preserving
+    # the distinction between requesting cleanup and proving the VM has stopped.
     def test_cleanup_failure_does_not_claim_termination(self):
         for state in ("Terminate", "Confirm"):
             kind, output, _, final = simulate(
@@ -243,6 +255,8 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(final, "CleanupFailed")
             self.assertNotIn("termination", output)
 
+    # Models persistent pending responses reaching the overall timeout without Catch
+    # cleanup, preserving the documented need for lifespan/manual recovery fallback.
     def test_pending_timeout_does_not_run_catch_cleanup(self):
         replies = {
             **self.replies,

@@ -41,6 +41,8 @@ class LifecycleTests(unittest.TestCase):
         connection.close()
         return result
 
+    # Keeps readiness/status checks side-effect-free and reports failed validation,
+    # preventing snapshot preparation from starting a job or masking an unusable image.
     def test_build_hooks_and_pending_status_do_not_start_worker(self):
         self.assertEqual(self.request("POST", HOOK + "ready"), (200, b""))
         self.assertEqual(self.request("GET", "/status"), (200, b'{"status":"pending"}'))
@@ -50,6 +52,8 @@ class LifecycleTests(unittest.TestCase):
         with patch.object(self.runtime, "validate", side_effect=OSError()):
             self.assertEqual(self.request("POST", HOOK + "validate")[0], 503)
 
+    # Rejects malformed, out-of-scope, or oversized job payloads before execution,
+    # enforcing the fixed demonstration inputs and run-hook size limit.
     def test_invalid_envelopes_never_start_worker(self):
         for envelope in (
             {},
@@ -74,6 +78,8 @@ class LifecycleTests(unittest.TestCase):
             parse_job({"microvmId": "test", "runHookPayload": json.dumps(JOB)}), JOB
         )
 
+    # Accepts one asynchronous job, rejects a duplicate launch, and preserves its
+    # terminal result through termination as required by the stable status contract.
     def test_real_async_process_and_stable_terminal_status(self):
         original = subprocess.Popen
 
@@ -96,6 +102,8 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(self.request("POST", HOOK + "terminate"), (200, b""))
         self.assertEqual(self.runtime.status(), "ok")
 
+    # Stops active work and reports interruption as an error, ensuring termination
+    # does not leave the worker running or turn incomplete work into success.
     def test_termination_kills_real_worker_process_group(self):
         child = subprocess.Popen(
             [sys.executable, "-c", "import time; time.sleep(60)"],
@@ -107,6 +115,8 @@ class LifecycleTests(unittest.TestCase):
         self.assertIsNotNone(child.poll())
         self.assertEqual(self.runtime.status(), "error")
 
+    # Returns a failed run-hook response and terminal error when spawning fails,
+    # so an unstarted job cannot appear accepted or remain pending indefinitely.
     def test_process_start_failure_is_terminal_and_not_acknowledged(self):
         with patch("worker.server.subprocess.Popen", side_effect=OSError()):
             self.assertEqual(
@@ -121,6 +131,8 @@ class LifecycleTests(unittest.TestCase):
             )
         self.assertEqual(self.runtime.status(), "error")
 
+    # Exercises credential-free sandbox validation and rejects missing tools,
+    # keeping the snapshot workspace clean and validation independent of secrets.
     def test_validation_removes_probe_and_never_supplies_credentials(self):
         def probe(args, **kwargs):
             self.assertEqual(

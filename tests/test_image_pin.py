@@ -30,6 +30,8 @@ class ImagePinTests(unittest.TestCase):
             "codeArtifact": {"uri": "s3://artifacts/image/source.zip"},
         }
 
+    # Checks the deployment pin against synthesized source using read-only calls,
+    # so verification cannot provision or update the image.
     def test_read_only_cli_checks_synthesized_source_and_prints_pin(self):
         from tools.verify_image import main
 
@@ -71,6 +73,8 @@ class ImagePinTests(unittest.TestCase):
             )
             self.assertIn("FactoryWorkflow:ImageVersion=1.0", output.getvalue())
 
+    # Rejects stale, mismatched, or unusable builds so the workflow cannot pin
+    # a version that fails the current-source and active-build checks.
     def test_only_exact_successful_active_current_source_is_pinnable(self):
         self.verify(self.image, self.version, "1.0", "s3://artifacts/image/source.zip")
         for update in (

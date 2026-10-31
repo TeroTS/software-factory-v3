@@ -14,6 +14,7 @@ TESTS = """import unittest
 from calculator import add
 
 class CalculatorTests(unittest.TestCase):
+    # Preserves the demonstration's addition baseline while multiplication is added.
     def test_add(self):
         self.assertEqual(add(2, 3), 5)
 """
@@ -48,6 +49,8 @@ class EvidenceTests(unittest.TestCase):
             event("gh pr create --base main"),
         ]
 
+    # Requires successful shell/test evidence before publication and rejects agent
+    # errors, preventing a process exit or incomplete command history from proving success.
     def test_passing_tests_precede_separate_publication_commands(self):
         self.evidence.verify_events(self.events)
         for events in (
@@ -70,6 +73,8 @@ class EvidenceTests(unittest.TestCase):
         ]
         self.evidence.verify_events(wrapped)
 
+    # Allows remote checks to resolve uncertain publication while rejecting edits
+    # after testing/commit, protecting duplicate avoidance and the tested result.
     def test_publication_timeouts_accept_agent_checks_of_existing_remote_work(self):
         recovered = [
             self.events[0],
@@ -90,12 +95,14 @@ class EvidenceTests(unittest.TestCase):
                 [*self.events[:2], event("python3 edit.py"), *self.events[2:]]
             )
 
+    # Requires a meaningful discoverable test addition without changing baseline
+    # assertions, preventing weakened or unchanged tests from manufacturing completion.
     def test_preserved_baseline_tests_and_meaningful_new_test(self):
         updated = (
             TESTS.replace(
                 "from calculator import add", "from calculator import add, multiply"
             )
-            + "\n    def test_multiply(self):\n        self.assertEqual(multiply(2, 3), 6)\n"
+            + "\n    # Checks multiplication so source evidence includes a meaningful new assertion.\n    def test_multiply(self):\n        self.assertEqual(multiply(2, 3), 6)\n"
         )
         self.evidence.verify_source(
             {"calculator.py": BASE, "tests/test_calculator.py": TESTS},
@@ -119,12 +126,14 @@ class EvidenceTests(unittest.TestCase):
                     },
                 )
 
+    # Accepts a new test in a different class despite a shared method name,
+    # avoiding false rejection of valid additions that preserve baseline tests.
     def test_new_test_class_can_reuse_baseline_method_names(self):
         updated = (
             TESTS.replace(
                 "from calculator import add", "from calculator import add, multiply"
             )
-            + "\nclass MultiplicationTests(unittest.TestCase):\n    def test_add(self):\n        self.assertEqual(multiply(2, 3), 6)\n"
+            + "\nclass MultiplicationTests(unittest.TestCase):\n    # Checks multiplication in a separate class to exercise same-name test acceptance.\n    def test_add(self):\n        self.assertEqual(multiply(2, 3), 6)\n"
         )
         self.evidence.verify_source(
             {"calculator.py": BASE, "tests/test_calculator.py": TESTS},
@@ -134,6 +143,8 @@ class EvidenceTests(unittest.TestCase):
             },
         )
 
+    # Requires exactly one open, unmerged PR matching the verified task commit and
+    # pinned main baseline, keeping published work available for human review.
     def test_pr_must_match_branch_commit_baseline_and_be_open(self):
         pr = {
             "number": 2,
@@ -260,7 +271,7 @@ class WorkerTests(unittest.TestCase):
             TESTS.replace(
                 "from calculator import add", "from calculator import add, multiply"
             )
-            + "\n    def test_multiply(self):\n        self.assertEqual(multiply(2, 3), 6)\n        self.assertEqual(multiply(-2, 3), -6)\n        self.assertEqual(multiply(-2, -3), 6)\n        self.assertEqual(multiply(0, 3), 0)\n        self.assertEqual(multiply(3, 0), 0)\n"
+            + "\n    # Covers positive, negative, and zero products to satisfy demonstration acceptance.\n    def test_multiply(self):\n        self.assertEqual(multiply(2, 3), 6)\n        self.assertEqual(multiply(-2, 3), -6)\n        self.assertEqual(multiply(-2, -3), 6)\n        self.assertEqual(multiply(0, 3), 0)\n        self.assertEqual(multiply(3, 0), 0)\n"
         )
         for cmd in (
             ["git", "add", "."],
@@ -289,6 +300,8 @@ class WorkerTests(unittest.TestCase):
             event("gh pr create --base main"),
         ]
 
+    # Exercises real local checkout, tests, and Git with simulated external services,
+    # checking one agent invocation, one PR, and secret-free passing-test logs.
     def test_real_checkout_tests_git_and_simulated_agent_publication(self):
         with (
             patch.dict(os.environ, self.env),
@@ -303,6 +316,8 @@ class WorkerTests(unittest.TestCase):
         for secret in ("github_pat_synthetic_token", "secret-access", "session-token"):
             self.assertNotIn(secret, logs.getvalue())
 
+    # Fails an unavailable pinned baseline before any agent call or PR, protecting
+    # the controlled-failure demonstration from unintended model use or publication.
     def test_missing_checkout_stops_before_agent(self):
         with (
             patch.dict(os.environ, self.env),
@@ -315,6 +330,8 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(self.agent_calls, 0)
         self.assertEqual(self.prs, [])
 
+    # Rejects an agent result with no command history because successful execution
+    # alone cannot prove testing and publication under the completion rules.
     def test_agent_exit_without_command_evidence_is_not_success(self):
         with (
             patch.dict(os.environ, self.env),
@@ -325,6 +342,8 @@ class WorkerTests(unittest.TestCase):
         ):
             self.task.execute(self.job)
 
+    # Rejects administrator identity before secret retrieval or agent work,
+    # enforcing execution-role access rather than borrowed operator privileges.
     def test_identity_guard_refuses_administrator_before_secret_or_model(self):
         def administrator(args, cwd, env, secrets=None):
             if args[:3] == ["aws", "sts", "get-caller-identity"]:
@@ -345,6 +364,8 @@ class WorkerTests(unittest.TestCase):
             self.task.execute(self.job)
         self.assertEqual(self.agent_calls, 0)
 
+    # Stops setup for missing/expired AWS credentials or an unusable GitHub token,
+    # preventing agent work from starting without validated runtime access.
     def test_missing_expired_credentials_and_invalid_secret_are_rejected(self):
         for override in (
             {"AccessKeyId": ""},
@@ -372,6 +393,8 @@ class WorkerTests(unittest.TestCase):
                 self.task.execute(self.job)
         self.assertEqual(self.agent_calls, 0)
 
+    # Rejects publication claims contradicted by remote/local Git or PR checks,
+    # enforcing meaningful scoped changes on a task branch rather than trusting the agent.
     def test_contradictory_independent_git_and_pr_evidence_rejects_success(self):
         replies = (
             (["git", "ls-remote"], "wrong refs/heads/task"),
@@ -401,6 +424,8 @@ class WorkerTests(unittest.TestCase):
             ):
                 self.task.execute(self.job)
 
+    # Removes both supplied secrets and newly seen AWS credential fields,
+    # protecting logs when execution-role credentials rotate during a job.
     def test_redactor_handles_known_and_rotated_credentials(self):
         text = 'github_pat_synthetic_token {"SecretAccessKey":"rotated-secret","SessionToken":"rotated-session","AccessKeyId":"ASIAXXXXXXXXXXXXXXXX"}'
         cleaned = self.task.redact(text, ["github_pat_synthetic_token"])
@@ -412,6 +437,8 @@ class WorkerTests(unittest.TestCase):
         ):
             self.assertNotIn(value, cleaned)
 
+    # Keeps successful command stderr visible while redacting secrets, preserving
+    # test diagnostics without violating the no-credentials-in-logs rule.
     def test_successful_test_stderr_is_retained_without_secrets(self):
         env = {**self.env, "GH_TOKEN": "test-private-value"}
         code = 'import sys; print("stdout-result"); print("test-output test-private-value", file=sys.stderr)'
@@ -423,6 +450,8 @@ class WorkerTests(unittest.TestCase):
         self.assertIn("test-output [REDACTED]\n", output.getvalue())
         self.assertNotIn("test-private-value", output.getvalue())
 
+    # Retains streamed events with redacted logs but rejects invalid JSON or nonzero
+    # exit, preventing broken agent execution from supplying usable completion evidence.
     def test_real_agent_stream_logs_redacted_output_and_requires_zero_exit(self):
         events = [event("printf gate2-shell-ok", output="gate2-shell-ok")]
         code = (
@@ -452,6 +481,8 @@ class WorkerTests(unittest.TestCase):
                     [os.sys.executable, "-c", code], "prompt", self.root, self.env, []
                 )
 
+    # Redacts newly seen AWS secrets inside JSON-encoded error messages,
+    # protecting logs even when credential details arrive nested in agent output.
     def test_rotated_credentials_in_nested_agent_error_are_redacted(self):
         error = {
             "type": "error",
@@ -470,6 +501,8 @@ class WorkerTests(unittest.TestCase):
         self.assertNotIn("rotated-private-value", logs.getvalue())
         self.assertNotIn("rotated-session-value", logs.getvalue())
 
+    # Rejects correct multiplication backed only by a positive-operand test,
+    # enforcing the required negative and zero coverage in the submitted tests.
     def test_acceptance_requires_committed_tests_for_all_operand_categories(self):
         from image.acceptance import verify
 
@@ -478,11 +511,13 @@ class WorkerTests(unittest.TestCase):
         )
         (self.origin / "tests/test_calculator.py").write_text(
             TESTS
-            + "\n    def test_multiply(self):\n        from calculator import multiply\n        self.assertEqual(multiply(2, 3), 6)\n"
+            + "\n    # Checks only a positive product, supplying deliberately incomplete acceptance coverage.\n    def test_multiply(self):\n        from calculator import multiply\n        self.assertEqual(multiply(2, 3), 6)\n"
         )
         with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(ValueError):
             verify(self.origin)
 
+    # Rejects a missing multiply function or one that loses negative results,
+    # independently checking required behavior rather than trusting submitted tests.
     def test_independent_acceptance_rejects_wrong_multiplication(self):
         from image.acceptance import verify
 
@@ -494,6 +529,8 @@ class WorkerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             verify(self.origin)
 
+    # Converts execution failure to a nonzero exit without printing its secret-bearing
+    # exception, allowing lifecycle error reporting without credential disclosure.
     def test_main_failure_logs_no_secret_and_exits_nonzero(self):
         with (
             patch.object(self.task, "execute", side_effect=ValueError("secret-value")),

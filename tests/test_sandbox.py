@@ -11,6 +11,8 @@ from pathlib import Path
     "Real Linux sandbox is checked by make preflight",
 )
 class SandboxTests(unittest.TestCase):
+    # Exercises the real Linux sandbox's local edit/test/commit workflow without
+    # credentials, checking tool compatibility without disabling Codex isolation.
     def test_real_sandbox_search_edit_tests_and_git_metadata(self):
         with tempfile.TemporaryDirectory(dir="/workspace") as directory:
             root = Path(directory)
@@ -27,7 +29,7 @@ run("git", "config", "user.name", "Sandbox Fixture")
 run("git", "config", "user.email", "fixture@example.invalid")
 Path("calculator.py").write_text("def add(a, b):\\n    return a + b\\n")
 Path("tests").mkdir()
-Path("tests/test_calculator.py").write_text("import unittest\\nfrom calculator import add\\nclass Tests(unittest.TestCase):\\n    def test_add(self):\\n        self.assertEqual(add(2, 3), 5)\\n")
+Path("tests/test_calculator.py").write_text("import unittest\\nfrom calculator import add\\nclass Tests(unittest.TestCase):\\n    # Preserves addition as the sandbox demonstration baseline.\\n    def test_add(self):\\n        self.assertEqual(add(2, 3), 5)\\n")
 run("python3", "-m", "unittest", "discover", "-s", "tests", "-v")
 run("git", "add", ".")
 run("git", "commit", "-m", "baseline")
@@ -37,7 +39,7 @@ assert "def add" in run("rg", "def add", "calculator.py")
 with Path("calculator.py").open("a") as file:
     file.write("\\ndef multiply(a, b):\\n    return a * b\\n")
 with Path("tests/test_calculator.py").open("a") as file:
-    file.write("    def test_multiply(self):\\n        from calculator import multiply\\n        for a,b in ((2,3),(-2,3),(-2,-3),(0,3),(3,0)):\\n            self.assertEqual(multiply(a,b), a*b)\\n")
+    file.write("    # Covers positive, negative, and zero products required by the demonstration task.\\n    def test_multiply(self):\\n        from calculator import multiply\\n        for a,b in ((2,3),(-2,3),(-2,-3),(0,3),(3,0)):\\n            self.assertEqual(multiply(a,b), a*b)\\n")
 run("python3", "-m", "unittest", "discover", "-s", "tests", "-v")
 run("git", "add", ".")
 run("git", "commit", "-m", "task")
