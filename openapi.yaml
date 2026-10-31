@@ -1,0 +1,265 @@
+openapi: 3.1.0
+info:
+  title: Software factory PoC lifecycle and worker interface
+  version: 0.1.0
+  description: >-
+    Contract derived from SPEC.md and DECISIONS.md; no service is implemented
+    or live-verified. GET /status is reached through AWS-managed HTTPS ingress.
+    Lifecycle POST hooks are invoked by Lambda on port 8080, not by the operator
+    or Step Functions as job-submission endpoints. AWS proxy authentication and
+    port headers are removed before requests reach the application. Lifecycle
+    security overrides describe internal AWS calls, not unauthenticated public
+    ingress. Non-HTTP boundaries are documented in docs/contracts.md.
+servers:
+  - url: https://{endpoint}
+    description: Use the endpoint returned for the launched MicroVM, not this placeholder.
+    variables:
+      endpoint:
+        default: microvm-endpoint.example.invalid
+paths:
+  /status:
+    get:
+      operationId: getStatus
+      summary: Read the current job status
+      description: >-
+        Poll only after the MicroVM reaches RUNNING. Reuse one port-8080 JWE
+        with a 30-minute expiration. Pending means work is active; ok requires
+        verified passing tests, a meaningful nonempty change, and confirmed
+        agent-side PR creation. Error means unrecoverable failure, with its cause
+        retained in CloudWatch. Terminal status never changes. Termination can
+        prevent any terminal response; missing status is never success.
+      security:
+        - MicrovmProxyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProxyPort'
+        - $ref: '#/components/parameters/ConnectionMarker'
+      responses:
+        '200':
+          description: Job state, not an assertion of VM termination or workflow success.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Status'
+              examples:
+                pending:
+                  value: {status: pending}
+                ok:
+                  value: {status: ok}
+                error:
+                  value: {status: error}
+        '400':
+          $ref: '#/components/responses/ProxyBadRequest'
+        '403':
+          $ref: '#/components/responses/ProxyForbidden'
+        '429':
+          $ref: '#/components/responses/ProxyThrottled'
+        '500':
+          $ref: '#/components/responses/ProxyInternalFailure'
+        '502':
+          $ref: '#/components/responses/ProxyUnavailable'
+        default:
+          $ref: '#/components/responses/RequestFailure'
+  /aws/lambda-microvms/runtime/v1/ready:
+    servers:
+      - url: http://localhost:8080
+        description: Internal application listener for AWS lifecycle calls.
+    post:
+      operationId: ready
+      summary: Confirm server readiness for image creation
+      description: >-
+        No agent, credentials retrieval, repository connection, or per-job state
+        is initialized. The snapshot must contain no secrets, task identifiers,
+        or live external connections.
+      security: []
+      responses:
+        '200':
+          description: Server ready for snapshotting; no response body is required.
+        '503':
+          $ref: '#/components/responses/HookNotReady'
+        default:
+          $ref: '#/components/responses/HookFailure'
+  /aws/lambda-microvms/runtime/v1/validate:
+    servers:
+      - url: http://localhost:8080
+        description: Internal application listener for AWS lifecycle calls.
+    post:
+      operationId: validate
+      summary: Validate the image without credential-dependent operations
+      description: >-
+        Check required executable availability, workspace writes, and basic
+        process execution. Do not retrieve credentials or perform model calls,
+        repository cloning, or publication.
+      security: []
+      responses:
+        '200':
+          description: Validation passed; no response body is required.
+        '503':
+          $ref: '#/components/responses/HookNotReady'
+        default:
+          $ref: '#/components/responses/HookFailure'
+  /aws/lambda-microvms/runtime/v1/run:
+    servers:
+      - url: http://localhost:8080
+        description: Internal application listener for AWS lifecycle calls.
+    post:
+      operationId: run
+      summary: Initialize one job and start its worker asynchronously
+      description: >-
+        Validate the AWS request envelope and its JSON-serialized job before
+        starting work. Initialize fresh runtime state and spawn the worker,
+        then return promptly within the configured run-hook limit (the source
+        plan records a 60-second CLI maximum). Cloning, checkout, credential
+        retrieval, and model calls belong to the asynchronous worker, not this
+        request. A successful hook response acknowledges startup, not task
+        completion. Neither worker nor workflow restarts Codex or reruns a job.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RunHookRequest'
+      responses:
+        '200':
+          description: Fresh job initialized and worker spawned; no response body is required.
+        default:
+          $ref: '#/components/responses/HookFailure'
+  /aws/lambda-microvms/runtime/v1/terminate:
+    servers:
+      - url: http://localhost:8080
+        description: Internal application listener for AWS lifecycle calls.
+    post:
+      operationId: terminate
+      summary: Stop the worker process group and flush available logs
+      description: >-
+        The hook may interrupt work before a terminal status is available.
+        Workspace state is destroyed by termination. Confirm TERMINATED with
+        the AWS lifecycle API; a hook response or termination request is not
+        that confirmation.
+      security: []
+      responses:
+        '200':
+          description: Worker stopped and available logs flushed; no response body is required.
+        default:
+          $ref: '#/components/responses/HookFailure'
+components:
+  securitySchemes:
+    MicrovmProxyAuth:
+      type: apiKey
+      in: header
+      name: X-aws-proxy-auth
+      description: >-
+        Opaque AWS-created JWE scoped to the launched VM and port 8080, expiring
+        after 30 minutes. AWS ingress validates it and removes proxy headers;
+        the worker does not implement JWE validation. Never log it or include it
+        in job input, prompts, or final workflow output. No token-refresh loop.
+  parameters:
+    ProxyPort:
+      name: X-aws-proxy-port
+      in: header
+      required: true
+      description: Route to the worker's port; must be permitted by the JWE.
+      schema:
+        type: string
+        const: '8080'
+    ConnectionMarker:
+      name: X-Poc-Connection
+      in: header
+      required: false
+      description: >-
+        Static marker supplied by the Gate 2 EventBridge connection and ignored
+        by the worker. Not authentication; not required for Gate 1 requests.
+        The connection must not override either X-aws-proxy header.
+      schema:
+        type: string
+  schemas:
+    Status:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [pending, ok, error]
+      description: >-
+        Exactly one field. No cause, logs, diff, commit SHA, PR URL, token usage,
+        or credentials. Worker error is conveyed inside HTTP 200, not a custom
+        HTTP error envelope. These shapes supersede the earlier source plan.
+    RunHookRequest:
+      type: object
+      required: [microvmId, runHookPayload]
+      properties:
+        microvmId:
+          type: string
+          minLength: 1
+          description: Identifier injected by AWS for this MicroVM, never snapshotted.
+        runHookPayload:
+          type: string
+          contentMediaType: application/json
+          contentSchema:
+            $ref: '#/components/schemas/Job'
+          description: >-
+            JSON serialization of Job, delivered as a string inside AWS's JSON
+            envelope, not as an embedded object or interpolated shell command.
+            The serialized string must satisfy AWS's documented 16 KB limit;
+            schema validation alone does not establish that size bound.
+    Job:
+      type: object
+      required: [repository, baseSha, task]
+      properties:
+        repository:
+          type: string
+          const: TeroTS/TeroTS-factory-smoke-test
+          description: Approved demonstration repository, expressed as owner/name.
+        baseSha:
+          type: string
+          minLength: 1
+          description: >-
+            Full pinned commit SHA of the tested demonstration baseline. Both
+            gates reuse it; controlled-failure and hard-lifespan jobs instead
+            use a SHA confirmed absent from the same repository. Existence
+            checking happens during worker checkout, not in the run hook.
+        task:
+          type: string
+          minLength: 1
+          description: >-
+            Approved agent task: add multiply(a, b) and positive, negative, and
+            zero operand tests while preserving addition. No deployment changes.
+      description: >-
+        Shared Gate 1 job and Gate 2 execution input. PR base main and test command
+        python3 -m unittest discover -s tests -v are fixed, not job configuration.
+        Image, roles, connectors, and credentials-secret ARN are supplied by
+        deployment. Never include secret values. No additional job fields are
+        defined by this contract.
+  responses:
+    HookNotReady:
+      description: >-
+        AWS build hook not ready or validation still in progress. Return 503
+        promptly; AWS retries until the configured build-hook timeout. No
+        response-body schema is required and no Codex invocation is started.
+    HookFailure:
+      description: >-
+        Non-success hook response or hook execution failure. No shared JSON
+        error envelope is defined. Invalid job configuration or startup failure
+        must not acknowledge successful startup or start an invalid job. Keep
+        diagnostic causes in CloudWatch without secrets; AWS lifecycle failure
+        is not task success.
+    ProxyBadRequest:
+      description: AWS ingress reports a malformed request or invalid port header; body unspecified.
+    ProxyForbidden:
+      description: >-
+        AWS ingress rejects a missing, expired, invalid, or incorrectly scoped
+        JWE; body unspecified. This is not worker status error and does not
+        enable a token-refresh loop.
+    ProxyThrottled:
+      description: AWS ingress rate limit exceeded; body unspecified.
+    ProxyInternalFailure:
+      description: AWS ingress internal error; body unspecified.
+    ProxyUnavailable:
+      description: AWS ingress cannot deliver to the application; body unspecified.
+    RequestFailure:
+      description: >-
+        Other non-200 HTTP responses are not valid job status. No custom body
+        schema is defined. HTTP failures, request timeouts, invalid JSON, or
+        missing/invalid status enter catchable workflow cleanup when possible,
+        never success or an automatic whole-task rerun.
