@@ -70,6 +70,7 @@ Source: [AWS Lambda MicroVM Software Factory PoC Plan](docs/plans/aws-lambda-mic
 
 ### Operations / Deployment
 
+- Factory development uses Python 3.14, `uv`, development-only Ruff and coverage.py dependencies, standard-library `unittest`, and Make commands. This does not add dependencies to the demonstration repository or establish the MicroVM's Python version/ARM64 compatibility; those remain Gate 1 checks.
 - Use `us-east-1`, the native Codex `amazon-bedrock-runtime` provider, and `us.openai.gpt-6.1-sol`. Set `AWS_REGION=us-east-1` and disable hosted web search. The inference profile can route within the United States, not only `us-east-1`.
 - Gate 1 resources: one private S3 artifact bucket, separate image-build and runtime roles, one runtime-credentials secret containing only the GitHub token, one CloudWatch log group, and one reusable MicroVM image.
 - Gate 2 adds one Step Functions Standard state machine and execution role, and one EventBridge connection with its automatically managed Secrets Manager secret.
