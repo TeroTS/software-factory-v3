@@ -10,7 +10,7 @@ The demonstration that turns one coding task into a tested GitHub PR inside an i
 
 ### Demonstration repository
 
-The controlled synthetic repository, `TeroTS/TeroTS-factory-smoke-test`, where the baseline is prepared and both gates publish their task PRs.
+The controlled synthetic repository, `TeroTS/factory-smoke-test`, where the baseline is prepared and both gates publish their task PRs.
 
 ### Demonstration baseline
 

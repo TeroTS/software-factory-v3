@@ -209,7 +209,7 @@ components:
       properties:
         repository:
           type: string
-          const: TeroTS/TeroTS-factory-smoke-test
+          const: TeroTS/factory-smoke-test
           description: Approved demonstration repository, expressed as owner/name.
         baseSha:
           type: string

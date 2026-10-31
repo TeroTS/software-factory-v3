@@ -2,9 +2,9 @@
 
 ## Repository Overview
 
-This is an operator-led AWS Lambda MicroVM software factory PoC. The current
-implementation is a local development bootstrap, not a running coding service.
-The worker, AWS orchestration, and deployment resources are not implemented.
+This is an operator-led AWS Lambda MicroVM software factory PoC.
+Implementation progress and verification evidence belong only in
+[docs/slices/current-slice.md](docs/slices/current-slice.md).
 
 Read [DECISIONS.md](DECISIONS.md) for accepted requirements and
 [README.md](README.md) for onboarding. There is no `SPEC.md` yet; use accepted
@@ -15,7 +15,7 @@ decisions for behavior until a specification is established.
 - The approved design keeps one Codex edit–test–fix and publication invocation
   inside one MicroVM; Step Functions manages the VM lifecycle, not the agent loop.
 - Gate 1 proves a real task and manual termination before Gate 2 adds
-  orchestration using the same image and worker. Neither live gate has passed.
+  orchestration using the same image and worker.
 - `TeroTS/TeroTS-factory-smoke-test` is a separate demonstration repository. Its
   dependency-free calculator fixture is not this factory's development toolchain.
 - Accepted decisions explicitly supersede earlier status-response shapes in the
@@ -98,6 +98,21 @@ Exemptions:
 
 - Generated files.
 
+## Documentation Boundaries
+
+- Record implementation status, story completion, verification evidence,
+  blockers, gate outcomes, and next steps only in `docs/slices/current-slice.md`.
+- `SPEC.md` and `DECISIONS.md` are locked. Any edit, including corrections,
+  requires separate, explicit user agreement for those files. Permission to
+  implement a story does not authorize changing its requirements or decisions.
+- `AGENTS.md` and `README.md` contain stable instructions, not implementation
+  progress. Never update them merely because a story starts or finishes.
+- Propose necessary changes to stable tooling or interface instructions
+  separately; obtain explicit user approval before editing these files.
+- General documentation-maintenance guidance, delivery skills, and completion
+  workflows do not authorize edits outside these boundaries. If instructions
+  conflict, stop and ask rather than updating protected documents.
+
 ## Change Guidelines
 
 Keep changes within the accepted PoC scope and preserve the two-gate order.
@@ -105,6 +120,7 @@ Never place credentials in committed files, job input, prompts, or logs. AWS and
 GitHub access requirements are in `DECISIONS.md`; local checks do not prove them.
 
 Run the relevant focused tests and `make verify` after changes, and report actual
-results and gaps. Keep README and agent guidance aligned when tooling or
-interfaces change. Do not claim planned components or live gates are implemented
-merely because local bootstrap verification passes.
+results and gaps. Follow Documentation Boundaries for any proposed README or
+agent-guidance changes when tooling or interfaces change. Do not claim planned
+components or live gates are implemented merely because local bootstrap
+verification passes.
