@@ -1,0 +1,148 @@
+import http.client
+import json
+import subprocess
+import sys
+import tempfile
+import threading
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from worker.server import HOOK, Runtime, make_server, parse_job
+
+JOB = {
+    "repository": "TeroTS/factory-smoke-test",
+    "baseSha": "a" * 40,
+    "task": "add multiply",
+}
+
+
+class LifecycleTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.runtime = Runtime(self.directory.name)
+        self.server = make_server(self.runtime, ("127.0.0.1", 0))
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.addCleanup(self.close)
+
+    def close(self):
+        self.runtime.terminate()
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join()
+
+    def request(self, method, path, body=None):
+        connection = http.client.HTTPConnection(*self.server.server_address, timeout=5)
+        connection.request(method, path, body=body)
+        response = connection.getresponse()
+        result = response.status, response.read()
+        connection.close()
+        return result
+
+    def test_build_hooks_and_pending_status_do_not_start_worker(self):
+        self.assertEqual(self.request("POST", HOOK + "ready"), (200, b""))
+        self.assertEqual(self.request("GET", "/status"), (200, b'{"status":"pending"}'))
+        self.assertFalse(self.runtime.started)
+        self.assertEqual(self.request("GET", "/other")[0], 404)
+        self.assertEqual(self.request("POST", "/other")[0], 404)
+        with patch.object(self.runtime, "validate", side_effect=OSError()):
+            self.assertEqual(self.request("POST", HOOK + "validate")[0], 503)
+
+    def test_invalid_envelopes_never_start_worker(self):
+        for envelope in (
+            {},
+            {"microvmId": "test", "runHookPayload": "bad"},
+            {
+                "microvmId": "test",
+                "runHookPayload": json.dumps({**JOB, "repository": "other"}),
+            },
+            {"microvmId": "test", "runHookPayload": json.dumps({**JOB, "task": " "})},
+            {
+                "microvmId": "test",
+                "runHookPayload": json.dumps({**JOB, "baseSha": "short"}),
+            },
+            {"microvmId": "test", "runHookPayload": "x" * 16385},
+        ):
+            with self.subTest(envelope=str(envelope)[:40]):
+                self.assertEqual(
+                    self.request("POST", HOOK + "run", json.dumps(envelope))[0], 400
+                )
+                self.assertFalse(self.runtime.started)
+        self.assertEqual(
+            parse_job({"microvmId": "test", "runHookPayload": json.dumps(JOB)}), JOB
+        )
+
+    def test_real_async_process_and_stable_terminal_status(self):
+        original = subprocess.Popen
+
+        def process(*args, **kwargs):
+            return original(
+                [
+                    sys.executable,
+                    "-c",
+                    "import sys,time; sys.stdin.read(); time.sleep(.1)",
+                ],
+                **kwargs,
+            )
+
+        envelope = json.dumps({"microvmId": "test", "runHookPayload": json.dumps(JOB)})
+        with patch("worker.server.subprocess.Popen", side_effect=process):
+            self.assertEqual(self.request("POST", HOOK + "run", envelope), (200, b""))
+        self.assertEqual(self.request("POST", HOOK + "run", envelope)[0], 409)
+        self.runtime.process.wait(timeout=5)
+        self.assertEqual(self.request("GET", "/status"), (200, b'{"status":"ok"}'))
+        self.assertEqual(self.request("POST", HOOK + "terminate"), (200, b""))
+        self.assertEqual(self.runtime.status(), "ok")
+
+    def test_termination_kills_real_worker_process_group(self):
+        child = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            start_new_session=True,
+        )
+        self.runtime.process = child
+        self.assertEqual(self.runtime.status(), "pending")
+        self.runtime.terminate()
+        self.assertIsNotNone(child.poll())
+        self.assertEqual(self.runtime.status(), "error")
+
+    def test_process_start_failure_is_terminal_and_not_acknowledged(self):
+        with patch("worker.server.subprocess.Popen", side_effect=OSError()):
+            self.assertEqual(
+                self.request(
+                    "POST",
+                    HOOK + "run",
+                    json.dumps(
+                        {"microvmId": "test", "runHookPayload": json.dumps(JOB)}
+                    ),
+                )[0],
+                500,
+            )
+        self.assertEqual(self.runtime.status(), "error")
+
+    def test_validation_removes_probe_and_never_supplies_credentials(self):
+        def probe(args, **kwargs):
+            self.assertEqual(
+                set(kwargs["env"]),
+                {"PATH", "HOME", "CODEX_HOME", "PYTHONDONTWRITEBYTECODE"},
+            )
+            self.assertTrue(Path(kwargs["env"]["CODEX_HOME"]).is_dir())
+            self.assertIn('sandbox_mode="workspace-write"', args)
+            return subprocess.CompletedProcess(args, 0, "sandbox-validation-ok\n", "")
+
+        with (
+            patch("worker.server.shutil.which", return_value="tool"),
+            patch("worker.server.subprocess.run", side_effect=probe),
+        ):
+            self.runtime.validate()
+        self.assertEqual(list(Path(self.directory.name).iterdir()), [])
+        with (
+            patch("worker.server.shutil.which", return_value=None),
+            self.assertRaises(OSError),
+        ):
+            self.runtime.validate()
+
+
+if __name__ == "__main__":
+    unittest.main()

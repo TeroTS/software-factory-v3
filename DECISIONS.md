@@ -1,6 +1,6 @@
 # AWS Lambda MicroVM Software Factory PoC Decisions
 
-Status: Accepted v1; not implemented or live-verified.
+Status: Accepted v2; includes the operator-approved native Python CDK Gate 2 reset. Implementation and verification evidence are recorded only in [the current slice](docs/slices/current-slice.md).
 
 ## Problem Summary
 
@@ -11,7 +11,7 @@ Source: [AWS Lambda MicroVM Software Factory PoC Plan](docs/plans/aws-lambda-mic
 ## Goals and Success Criteria
 
 - **Gate 1 — execution feasibility:** manually launch one VM using AWS CLI, complete the real coding task through agent-side commit, push, and PR creation, then manually terminate and confirm `TERMINATED`. Retain the VM ID and verification outcomes locally. Stop if execution, publication, or termination fails; do not create Gate 2 resources before this passes.
-- **Gate 2 — orchestration:** reuse the proven image and worker in a manually started Step Functions Standard execution. Launch exactly one VM for the task, obtain one authentication token, poll worker status, terminate, confirm `TERMINATED`, and finish in `Succeed` without a running local controller.
+- **Gate 2 — orchestration:** use native Python CDK infrastructure and a newly validated image/worker under the [approved reset plan](docs/plans/gate2.md), rather than carrying the disposable Gate 1 implementation forward unchanged. A manually started Step Functions Standard execution launches exactly one VM for the task, obtains one authentication token, polls worker status, terminates, confirms `TERMINATED`, and finishes in `Succeed` without a running local controller.
 - Each successful task must make a nonempty, meaningful source/test change, record the passing test command and actual exit code, and create a commit descended from the pinned baseline. Codex must push the unique task branch and create one PR inside the VM; neither PR is merged by the agent.
 - Demonstrate one controlled Gate 2 failure ending in `Fail`, with the cause retained in CloudWatch logs, no PR, and confirmed VM termination.
 - Separately verify automatic hard-lifespan termination. Small negative-path tests cover other worker/workflow failures where practical; exhaustive live fault injection and observed repair of a failing test are not required.
@@ -36,7 +36,7 @@ Source: [AWS Lambda MicroVM Software Factory PoC Plan](docs/plans/aws-lambda-mic
 
 ### Product / Scope
 
-- Demonstration repository: [TeroTS/TeroTS-factory-smoke-test](https://github.com/TeroTS/TeroTS-factory-smoke-test), with PRs targeting `main`.
+- Demonstration repository: [TeroTS/factory-smoke-test](https://github.com/TeroTS/factory-smoke-test), with PRs targeting `main`.
 - Prepare a tiny dependency-free Python baseline: `calculator.py` exposes `add(a, b)` with passing standard-library `unittest` tests in `tests/test_calculator.py`.
 - Agent task: add `multiply(a, b)` and tests for positive, negative, and zero operands, preserving addition behavior. Do not modify deployment configuration.
 - Use the same pinned, tested baseline and task for both gates, with separate unique task branches and PRs. Leave both PRs unmerged for human review.
@@ -45,7 +45,7 @@ Source: [AWS Lambda MicroVM Software Factory PoC Plan](docs/plans/aws-lambda-mic
 ### UX / Workflow
 
 - Manual AWS CLI launch and termination establish Gate 1. Only after Gate 1 passes, add Step Functions and its EventBridge connection for Gate 2.
-- Both gates use the same lifecycle/worker implementation and pinned image version; no separate feasibility runner.
+- Gate 1 uses one lifecycle/worker and pinned image, not a separate feasibility runner. Gate 2 may replace that disposable implementation, but must revalidate the new image/worker against the same execution, publication, sandbox, and status requirements. Use the Gate 2 pinned image/worker for its success, controlled-failure, and hard-lifespan demonstrations.
 - One Codex invocation owns the complete edit–test–fix and publication workflow. Test failures feed its existing loop rather than immediately becoming terminal errors.
 - The operator starts only one VM/job at a time. Independent Step Functions executions are not automatically serialized.
 
@@ -73,6 +73,7 @@ Source: [AWS Lambda MicroVM Software Factory PoC Plan](docs/plans/aws-lambda-mic
 - Factory development uses Python 3.14, `uv`, development-only Ruff and coverage.py dependencies, standard-library `unittest`, and Make commands. This does not add dependencies to the demonstration repository or establish the MicroVM's Python version/ARM64 compatibility; those remain Gate 1 checks.
 - Use `us-east-1`, the native Codex `amazon-bedrock-runtime` provider, and `us.openai.gpt-6.1-sol`. Set `AWS_REGION=us-east-1` and disable hosted web search. The inference profile can route within the United States, not only `us-east-1`.
 - Gate 1 resources: one private S3 artifact bucket, separate image-build and runtime roles, one runtime-credentials secret containing only the GitHub token, one CloudWatch log group, and one reusable MicroVM image.
+- Gate 2 defines all infrastructure through native Python CDK, without `CfnInclude`, importing the Gate 1 template, or adopting the old stack. Remove and recreate the old stack resources and separately managed image only after explicit operator authorization; preserve the existing GitHub-token secret and Gate 1 PR. Resolve CDK-managed image creation/update, version pinning, and bootstrap requirements before implementation or deletion; manual-only image provisioning is not a substitute.
 - Gate 2 adds one Step Functions Standard state machine and execution role, and one EventBridge connection with its automatically managed Secrets Manager secret.
 - Build on `public.ecr.aws/lambda/microvms:al2023-minimal` and managed base `arn:aws:lambda:us-east-1:aws:microvm-image:al2023-1`, using Linux ARM64 tools and a pinned Codex executable supporting the selected native provider.
 - Image sizing: 2 GB / 1 vCPU baseline, bursting up to 8 GB / 4 vCPU, with 8 GB maximum disk. Revisit only if measurements justify it.
@@ -122,7 +123,7 @@ Source: [AWS Lambda MicroVM Software Factory PoC Plan](docs/plans/aws-lambda-mic
 - Use the supplied provisioning/operator profile `AWSAdministratorAccess-172318459814`; never transfer its credentials into the image. Retain manual termination and log-inspection access.
 - The workflow and VM clocks start at different times. The 28/30-minute bounds do not guarantee a two-minute cleanup margin. Workflow timeout and manual `StopExecution` do not run `Catch` cleanup or stop the worker; the VM lifespan and manual recovery are the fallback.
 - Controlled Gate 2 failure: submit an otherwise valid job with a SHA confirmed absent from the repository. Checkout fails before Codex starts, returns `{"status":"error"}`, creates no PR, and must lead to confirmed termination and workflow `Fail`, with the cause retained in CloudWatch logs.
-- Hard-lifespan check: launch the same image with a two-minute maximum lifespan and the non-publishing nonexistent-base-commit job. Keep idle suspension at one hour. Do not explicitly terminate; confirm automatic `TERMINATED`. No Codex/model call is needed. Record failure and terminate manually if automatic termination fails.
+- Hard-lifespan check: launch the pinned Gate 2 image with a two-minute maximum lifespan and the non-publishing nonexistent-base-commit job. Keep idle suspension at one hour. Do not explicitly terminate; confirm automatic `TERMINATED`. No Codex/model call is needed. Record failure and terminate manually if automatic termination fails.
 - Validate the state-machine definition and inspect roles before deployment. Gate 2's successful live task must prove authenticated HTTP access and token reuse across polls.
 - Small tests should cover worker setup/process failures, invalid/missing terminal responses, HTTP failures, and cleanup routing where practical. Verify the overall timeout configuration and simulate persistent pending/timeout behavior where practical. Defer exhaustive live credential, authentication, network, stopped-execution, unresolved-test-failure, and terminal-closure demonstrations.
 
@@ -135,7 +136,7 @@ Source: [AWS Lambda MicroVM Software Factory PoC Plan](docs/plans/aws-lambda-mic
 
 ## Open Questions
 
-- None requiring further product or design decisions. Fixture preparation, baseline pinning, credential provisioning, and live gate verification remain prerequisites, not completed work.
+- Gate 2 CDK image-provisioning support and bootstrap requirements must be resolved during US-04 preparation. This is an implementation-design question, not authorization to add a custom-resource provider or substitute manual-only provisioning; seek approval if a new dependency or architecture change is necessary.
 
 ## Ready for Spec Generation
 

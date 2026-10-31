@@ -4,7 +4,10 @@ AWS-owned submission exchanges for the software factory PoC. Our HTTP
 interfaces and shared payload schemas are defined **only in
 [openapi.yaml](../openapi.yaml)**. Behavior and gate requirements remain in
 [SPEC.md](../SPEC.md) and [DECISIONS.md](../DECISIONS.md).
-**These interfaces are planned, not implemented or live-verified.**
+The approved Gate 2 reset replaces infrastructure and worker
+implementation without changing these submission or HTTP contracts.
+Implementation and verification evidence belong in
+[the current slice](slices/current-slice.md).
 
 ## Operator → Step Functions: start a job
 
@@ -52,10 +55,10 @@ authentication, headers, request/response bodies, and the shared `Job` and
 
 ## Sequence diagrams
 
-| Exchange | Rendered diagram | Editable source |
-| --- | --- | --- |
-| Image creation: one snapshot per image version | [Image-build sequence](diagrams/key_flow_image_build.svg) | [D2](diagrams/key_flow_image_build.d2) |
-| Job launch, polling, termination: reuse the pinned snapshot | [Job-lifecycle sequence](diagrams/key_flow_job_lifecycle.svg) | [D2](diagrams/key_flow_job_lifecycle.d2) |
+| Exchange | Rendered diagram |
+| --- | --- |
+| Image creation: one snapshot per image version | [Image-build sequence](diagrams/key_flow_image_build.svg) |
+| Job launch, polling, termination: reuse the pinned snapshot | [Job-lifecycle sequence](diagrams/key_flow_job_lifecycle.svg) |
 
 ## Slice Handoff
 

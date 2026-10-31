@@ -33,7 +33,7 @@ Step Functions manages the VM, not the coding loop. No local controller needs to
 ## Proving the PoC
 
 1. **Prove execution first:** manually launch the VM, complete a real coding task through PR creation, and confirm shutdown.
-2. **Add orchestration:** reuse the same image and worker with Step Functions, then demonstrate the full workflow and basic failure cleanup.
+2. **Add orchestration:** build a clean implementation with native Python CDK, then demonstrate the full Step Functions workflow and failure cleanup. Replace the old infrastructure rather than importing its CloudFormation template; preserve the GitHub-token secret and published PR. The Dockerfile and useful server code are starting points, not a requirement to retain the throwaway worker/tests.
 
 Use one controlled repository and run one task at a time. Credentials must be restricted to the required resources. A maximum VM lifespan limits resource use if orchestration stops unexpectedly.
 

@@ -5,19 +5,20 @@ Source: `DECISIONS.md`
 ## Summary
 - An operator-led software factory PoC that turns one approved coding task into
   a tested GitHub PR inside an AWS Lambda MicroVM, then confirms VM termination.
-  Only the local development bootstrap exists; fixture preparation, deployment,
-  and both live gates remain outstanding. This specification packages accepted
-  decisions, not proof of runtime feasibility. Baseline SHA, pinned CLI/image
-  version, credential provisioning, resource identifiers, and gate evidence
-  remain preparation/deployment outputs to record, not values to invent.
+  This specification defines accepted behavior, not implementation status or
+  proof of runtime feasibility. Preparation outputs and verification evidence
+  belong only in [the current slice](docs/slices/current-slice.md).
+  The [approved Gate 2 reset](docs/plans/gate2.md) replaces the disposable Gate 1
+  infrastructure/image/worker using native Python CDK, preserving the existing
+  GitHub-token secret and published PR.
 
 ## Goals
 - Gate 1: manually prove the real coding task, agent-side publication, and
   confirmed manual termination before creating Gate 2 orchestration resources.
-- Gate 2: reuse Gate 1's pinned image and worker in a manually started Step
-  Functions Standard execution that launches exactly one VM, reuses one auth
-  token across status polls, confirms termination, and finishes in `Succeed`
-  without a running local controller.
+- Gate 2: use native Python CDK infrastructure and a newly validated pinned
+  image/worker in a manually started Step Functions Standard execution that
+  launches exactly one VM, reuses one auth token across status polls, confirms
+  termination, and finishes in `Succeed` without a running local controller.
 - Demonstrate one controlled Gate 2 failure with no PR, its cause in CloudWatch,
   confirmed termination, and workflow `Fail`.
 - Separately prove automatic hard-lifespan termination. Retain VM IDs and gate
@@ -47,7 +48,7 @@ Primary actor: Operator
 Trigger: The approved demonstration fixture is not yet prepared.
 
 Happy-path action: Prepare and test the calculator fixture in
-`TeroTS/TeroTS-factory-smoke-test`, then record its committed baseline SHA.
+`TeroTS/factory-smoke-test`, then record its committed baseline SHA.
 
 Visible outcome: One tested demonstration baseline is available for both gates.
 
@@ -168,7 +169,8 @@ Acceptance criteria:
 
 Deferred follow-ups:
 - US-03: Manually terminate the VM and establish Gate 1's result.
-- US-04: Reuse the proven image and worker under orchestration after Gate 1 passes.
+- US-04: Submit the task through orchestration with a newly validated image and
+  worker after Gate 1 passes.
 
 ### US-03: Confirm manual termination and the Gate 1 result
 Primary actor: Operator
@@ -204,7 +206,7 @@ Deferred follow-ups:
 ### US-04: Submit a task that succeeds with orchestrated cleanup
 Primary actor: Operator
 
-Trigger: Gate 1 has passed and its pinned image and worker are proven.
+Trigger: Gate 1 has passed; Gate 2 follows the approved native Python CDK reset.
 
 Happy-path action: Manually start one Step Functions Standard execution for the
 approved task and pinned baseline.
@@ -215,11 +217,30 @@ finishes in `Succeed` after confirming VM termination, without a local controlle
 Authoritative state transition: The Step Functions execution moves from running
 to `Succeed` only after worker `{"status":"ok"}` and confirmed `TERMINATED`.
 
-Slice boundary: Gate 2's state machine, execution role, EventBridge connection,
-authenticated polling, and cleanup around the unchanged image/worker; one
-focused end-to-end run proves publication, token reuse, and confirmed cleanup.
+Slice boundary: Native Python CDK infrastructure, a replacement image/worker,
+Gate 2's state machine, execution role, EventBridge connection, authenticated
+polling, and cleanup; one focused end-to-end run proves publication, token
+reuse, and confirmed cleanup. Reconcile reset requirements and resolve worker
+acceptance and image provisioning within this story before implementation.
 
 Acceptance criteria:
+- Define all Gate 2 infrastructure using native Python CDK; do not include the
+  old CloudFormation template or adopt its stack. Resolve image resource support,
+  bootstrap requirements, creation/update lifecycle, and successful active version
+  pinning before implementation or destructive transition. Do not silently use
+  manual-only provisioning or introduce an unapproved custom-resource provider.
+- Replace disposable Gate 1 resources/image only after explicit operator
+  authorization, preserving the GitHub-token secret and unmerged Gate 1 PR.
+  Validate the newly built image's actual runtime-role/model/sandbox/tool
+  compatibility; Gate 1's evidence does not establish compatibility of a rebuild.
+- The replacement worker retains the existing Job and lifecycle/status contracts.
+  One Codex invocation owns editing, testing, fixes, and publication. Before
+  reporting stable `ok`, verify passing approved tests with actual exit code `0`,
+  meaningful source/test changes without weakened tests, baseline ancestry,
+  and agent-side publication of one unique-branch PR to `main`, left unmerged.
+  Process exit or HTTP 200 alone is insufficient. Unrecoverable failures report
+  stable `error`, with causes in CloudWatch and no secrets in input/prompts/logs.
+  This specifies required evidence, not reuse of calculator-specific worker code.
 - Only after Gate 1 passes, add one Standard state machine/execution role and
   one EventBridge connection with its automatically managed Secrets Manager
   secret. Validate the definition and inspect scoped roles/trust policies before
@@ -292,8 +313,8 @@ Deferred follow-ups:
 ### US-06: Verify the independent hard-lifespan fallback
 Primary actor: Operator
 
-Trigger: The same pinned image is available after Gate 1 for a separate lifespan
-check, using a base SHA confirmed absent from the repository.
+Trigger: The newly validated pinned Gate 2 image is available for a separate
+lifespan check, using a base SHA confirmed absent from the repository.
 
 Happy-path action: Launch the non-publishing job with a two-minute maximum
 lifespan and observe it without requesting termination.
@@ -305,11 +326,11 @@ Authoritative state transition: The MicroVM reaches service-confirmed
 `TERMINATED` through automatic hard-lifespan enforcement.
 
 Slice boundary: A separate manual VM launch and lifecycle observation using the
-same image/worker; one focused end-to-end check of the automatic safety bound.
-No new orchestrator or job deadline.
+Gate 2 pinned image/worker; one focused end-to-end check of the automatic safety
+bound. No new orchestrator or job deadline.
 
 Acceptance criteria:
-- Use the nonexistent-base-commit job, the same image, a two-minute maximum
+- Use the nonexistent-base-commit job, the pinned Gate 2 image, a two-minute maximum
   lifespan, and the normal one-hour idle policy with suspension/resume disabled.
   No Codex/model call or PR is needed; do not explicitly terminate during the
   automatic-termination check.
@@ -323,4 +344,6 @@ Deferred follow-ups:
 - None.
 
 ## Open Questions
-- None.
+- Within US-04 preparation, resolve native CDK image resource support and
+  bootstrap requirements before implementation. Any necessary dependency or
+  architecture change requires approval; do not infer support from the CLI API.

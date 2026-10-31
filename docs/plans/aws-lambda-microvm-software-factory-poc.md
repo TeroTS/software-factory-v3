@@ -4,13 +4,15 @@ Status: Proposed; not implemented. Based on [software_factory_poc.md](../../soft
 
 Approved direction: simplicity first. One Codex invocation owns the edit–test–fix loop, then commits, pushes, and runs `gh pr create` inside the MicroVM. AWS Step Functions replaces the local launcher, manages the VM lifecycle, and receives terminal success/error status.
 
+**Gate 2 reset:** follow the accepted direction in [DECISIONS.md](../../DECISIONS.md). Its operator-approved remove-and-recreate approach supersedes this document's earlier assumption that Gate 1 infrastructure, image, worker, and tests must be carried forward unchanged. Preserve the existing GitHub-token secret and published PR; do not import the old CloudFormation template. Implementation evidence remains in [the current slice](../slices/current-slice.md).
+
 **Feasibility:** Documentation and CLI checks support the proposed approach. Live image creation, Codex execution, and end-to-end orchestration remain unverified; Gate 1 establishes runtime feasibility and Gate 2 verifies orchestration.
 
 **Agent:** Run the existing headless Codex CLI inside the MicroVM. Codex owns the edit–test–fix loop and GitHub publication; Step Functions manages VM lifecycle. Use Codex's native `amazon-bedrock-runtime` provider with inference profile `us.openai.gpt-6.1-sol` in `us-east-1`, authenticated through the MicroVM execution role. No OpenAI API key, inference proxy, Agents API integration, or custom reasoning loop is required.
 
 ## 1. Minimal PoC Architecture
 
-This is the final architecture. Gate 1 uses manual AWS CLI launch and termination to prove execution; Gate 2 adds Step Functions around the same image and worker.
+Gate 1 uses manual AWS CLI launch and termination to prove execution. Gate 2 preserves the lifecycle architecture below, but uses native Python CDK and a clean replacement.
 
 ```mermaid
 flowchart LR
@@ -88,7 +90,7 @@ Sources: [networking](../aws-lambda-microvms/microvms-networking.md), [security]
 
 ## 2. Implementation Plan
 
-Step Functions orchestration with direct HTTP polling, readiness checks before polling, one auth token per execution, agent-side commit/push/PR creation, the built-in Codex edit–test–fix loop, and terminal success/error reporting are approved. Use only a VM maximum lifespan and an overall workflow timeout as job-level time bounds; do not implement separate worker or polling deadlines. Implementation proceeds through two approved gates: prove execution with a manual AWS CLI launch first, then add orchestration using the same image and worker. Remaining choices below are **proposals for approval**, not implemented configuration.
+Step Functions orchestration with direct HTTP polling, readiness checks before polling, one auth token per execution, agent-side commit/push/PR creation, the built-in Codex edit–test–fix loop, and terminal success/error reporting are approved. Use only a VM maximum lifespan and an overall workflow timeout as job-level time bounds; do not implement separate worker or polling deadlines. Implementation proceeds through two gates: prove execution with a manual AWS CLI launch first, then implement the native Python CDK replacement and orchestration. Remaining choices below are **proposals for approval**, not implemented configuration.
 
 Implementation verification is limited to a successful end-to-end task, one controlled failure proving error reporting and cleanup, and a separate hard-lifespan check. Observed test-failure repair and exhaustive live fault injection are not required for the initial PoC.
 
@@ -205,7 +207,9 @@ Use AWS CLI to launch one VM from the pinned image with the runtime role, manage
 
 ### Step 6 — Create orchestration resources and define the lifecycle workflow
 
-After Gate 1 passes, create one Step Functions Standard state machine and execution role, and one EventBridge connection. EventBridge automatically stores its connection credentials in a managed Secrets Manager secret. Reuse the proven image and worker without a second execution implementation.
+First apply the approved Gate 2 reset: replace the disposable Gate 1 infrastructure with native Python CDK definitions, preserve the GitHub-token secret and published PR, and build a newly validated image/worker. Do not import the old template or assume unchanged reuse of its calculator-specific worker/tests.
+
+Create one Step Functions Standard state machine and execution role, and one EventBridge connection through CDK. EventBridge automatically stores its connection credentials in a managed Secrets Manager secret. One Gate 2 worker remains responsible for execution inside the VM; the workflow manages only its lifecycle.
 
 Validate the state-machine definition before deployment, inspect the Gate 2 policies and trust relationship listed in Step 2, and ensure the connection does not define or override `X-aws-proxy-auth` or `X-aws-proxy-port`.
 

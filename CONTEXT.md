@@ -34,7 +34,7 @@ The execution-feasibility gate: manually launch a VM, complete the real agent ta
 
 ### Gate 2
 
-The orchestration gate: reuse Gate 1's proven image and worker under Step Functions to demonstrate a successful job and controlled failure with confirmed cleanup, including authenticated status polling and token reuse.
+The orchestration gate: use native Python CDK infrastructure and a newly validated pinned image/worker under Step Functions to demonstrate a successful job and controlled failure with confirmed cleanup, including authenticated status polling and token reuse. Gate 1's disposable implementation need not be carried forward unchanged; the execution and publication requirements remain.
 
 ### Controlled failure
 

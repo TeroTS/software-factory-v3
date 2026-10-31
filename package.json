@@ -1,0 +1,12 @@
+{
+  "name": "software-factory-v3-infra",
+  "private": true,
+  "scripts": {
+    "synth": "cdk synth",
+    "diff": "cdk diff",
+    "deploy": "cdk deploy --require-approval broadening"
+  },
+  "devDependencies": {
+    "aws-cdk": "2.1147.0"
+  }
+}
