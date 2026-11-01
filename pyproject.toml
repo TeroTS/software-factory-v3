@@ -14,9 +14,9 @@ package = false
 include = ["*.py", "*.pyi"]
 
 [tool.ruff.per-file-target-version]
-"worker/*.py" = "py39"
-"image/*.py" = "py39"
-"tests/*.py" = "py39"
+"worker/*.py" = "py313"
+"image/*.py" = "py313"
+"tests/*.py" = "py313"
 
 [tool.coverage.run]
 branch = true

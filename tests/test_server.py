@@ -6,7 +6,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 from worker.server import HOOK, Runtime, make_server, parse_job
 
@@ -84,6 +84,7 @@ class LifecycleTests(unittest.TestCase):
         original = subprocess.Popen
 
         def process(*args, **kwargs):
+            self.assertEqual(args[0], [sys.executable, "-m", "worker.task"])
             return original(
                 [
                     sys.executable,
@@ -141,13 +142,15 @@ class LifecycleTests(unittest.TestCase):
             )
             self.assertTrue(Path(kwargs["env"]["CODEX_HOME"]).is_dir())
             self.assertIn('sandbox_mode="workspace-write"', args)
+            self.assertEqual(args[args.index("--") + 1], sys.executable)
             return subprocess.CompletedProcess(args, 0, "sandbox-validation-ok\n", "")
 
         with (
-            patch("worker.server.shutil.which", return_value="tool"),
+            patch("worker.server.shutil.which", return_value="tool") as which,
             patch("worker.server.subprocess.run", side_effect=probe),
         ):
             self.runtime.validate()
+        self.assertIn(call(sys.executable), which.call_args_list)
         self.assertEqual(list(Path(self.directory.name).iterdir()), [])
         with (
             patch("worker.server.shutil.which", return_value=None),

@@ -11,6 +11,13 @@ with 10 seconds. Reconcile conflicting decisions, vocabulary, and interface
 contracts before implementing the affected story; this backlog does not authorize
 deployment, live jobs, or destructive replacement.
 
+For US-08–US-14, record story-specific implementation details, dependency choices,
+progress, verification evidence, and live-run guidance only in
+`docs/slices/current-slice.md`. These stories do not require or authorize updates
+to `README.md`, `AGENTS.md`, or `DECISIONS.md`. Required interface-contract changes
+remain in scope; ask the operator before resolving a conflict through changes to
+accepted decisions or repository guidance.
+
 ## Summary
 - An operator-led software factory PoC that turns one approved coding task into
   a tested GitHub PR inside an AWS Lambda MicroVM, then confirms VM termination.
@@ -468,7 +475,7 @@ Acceptance criteria:
   and failure reporting. Review scripts' access to runtime credentials and
   reconcile the controlled-repository trust assumption before enabling another
   repository; never silently broaden credential scope.
-- Update affected contracts, decisions, vocabulary, fixtures, and documentation.
+- Update affected interface contracts and fixtures.
   The factory's own Make-based workflow remains unchanged. Cover another
   authorized repository, unauthorized input, missing/failing scripts, and
   verification/publication failures; run focused tests, `make verify`, and
@@ -504,7 +511,7 @@ Acceptance criteria:
 - Replace `TEST_COMMAND` with `./scripts/verify`, then delete
   `worker/evidence.py` and unused imports.
 - Delete `image/acceptance.py`, its worker invocation/path constant, and associated
-  image/build references, documentation, and calculator-acceptance tests.
+  image/build references and calculator-acceptance tests.
   Do not relocate or retain those checks in demonstration testing.
 - Retain generic worker coverage in `tests/test_worker.py` and elsewhere for
   credentials, verification failures, clean commits, and PR consistency; replace
@@ -512,7 +519,7 @@ Acceptance criteria:
 - Independent final verification and Git/PR checks remain required. Neither
   those checks nor manual diff review proves verification preceded publication;
   no structural protection against weakened tests remains. Reflect these reduced
-  automated guarantees in decisions, contracts, and documentation.
+  automated guarantees in affected interface contracts and the current slice note.
 - Run focused tests, `make verify`, and `make preflight`; investigate coverage
   changes without hiding removed code through narrower measurement scope.
 
@@ -610,8 +617,9 @@ Acceptance criteria:
   An uncertain publication may have remote effects; do not assume every such
   failure guarantees no PR.
 - Keep simulated-service local checks credential-free. Live AWS/GitHub runs are
-  explicit and separately authorized, with documented credentials, costs, cleanup,
-  and run commands; ordinary `make verify` neither deploys nor creates resources.
+  explicit and separately authorized, with required credentials, costs, cleanup,
+  and run commands recorded in the current slice note; ordinary `make verify`
+  neither deploys nor creates resources.
 - Run focused tests, `make verify`, and applicable image/synthesis checks;
   investigate coverage decreases without narrowing scope or lowering gates.
   Preserve the two-gate order; local simulations do not replace US-05/US-06's

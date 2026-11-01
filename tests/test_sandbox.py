@@ -11,6 +11,28 @@ from pathlib import Path
     "Real Linux sandbox is checked by make preflight",
 )
 class SandboxTests(unittest.TestCase):
+    # Verify the actual ARM64 image runtime and both invocation names, including
+    # script shebangs, before accepting the interpreter selection.
+    def test_selected_runtime_and_repository_interpreter(self):
+        self.assertEqual(sys.version_info[:2], (3, 13))
+        self.assertEqual(
+            subprocess.check_output(["uname", "-m"], text=True).strip(), "aarch64"
+        )
+        for executable in (sys.executable, "python3.13", "python3"):
+            with self.subTest(executable=executable):
+                version = subprocess.check_output(
+                    [executable, "-c", "import sys; print(sys.version_info[:2])"],
+                    text=True,
+                ).strip()
+                self.assertEqual(version, "(3, 13)")
+        with tempfile.TemporaryDirectory(dir="/workspace") as directory:
+            script = Path(directory) / "verify"
+            script.write_text(
+                "#!/usr/bin/env python3\nimport sys\nassert sys.version_info[:2] == (3, 13)\n"
+            )
+            script.chmod(0o755)
+            subprocess.run([str(script)], check=True, timeout=5)
+
     # Exercises the real Linux sandbox's local edit/test/commit workflow without
     # credentials, checking tool compatibility without disabling Codex isolation.
     def test_real_sandbox_search_edit_tests_and_git_metadata(self):
@@ -20,6 +42,10 @@ class SandboxTests(unittest.TestCase):
             (root / ".git").mkdir()
             script = """from pathlib import Path
 import subprocess
+import sys
+
+assert sys.version_info[:2] == (3, 13)
+assert subprocess.check_output(["python3", "-c", "import sys; print(sys.version_info[:2])"], text=True).strip() == "(3, 13)"
 
 def run(*args):
     return subprocess.check_output(args, text=True)

@@ -5,7 +5,7 @@ import re
 import subprocess
 import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from worker.evidence import TEST_COMMAND, verify_events, verify_pr, verify_source
@@ -76,8 +76,8 @@ def credentials(env, secrets):
         if not isinstance(values.get(key), str) or not values[key]:
             raise ValueError("Missing temporary runtime credentials")
         secrets.append(values[key])
-    expiry = datetime.fromisoformat(values.get("Expiration", "").replace("Z", "+00:00"))
-    if expiry <= datetime.now(timezone.utc):
+    expiry = datetime.fromisoformat(values.get("Expiration", ""))
+    if expiry <= datetime.now(UTC):
         raise ValueError("Runtime credentials expired")
     identity = json.loads(
         capture(["aws", "sts", "get-caller-identity", "--output", "json"], None, env)

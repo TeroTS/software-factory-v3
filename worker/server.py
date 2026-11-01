@@ -54,7 +54,7 @@ class Runtime:
 
     # Check tools and real workspace-write sandbox execution without credentials/network calls.
     def validate(self):
-        for tool in ("python3", "git", "gh", "codex", "bwrap", "rg", "aws"):
+        for tool in (sys.executable, "git", "gh", "codex", "bwrap", "rg", "aws"):
             if shutil.which(tool) is None:
                 raise OSError("Missing required executable")
         with tempfile.TemporaryDirectory(dir=self.workspace) as directory:
