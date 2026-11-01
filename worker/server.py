@@ -31,7 +31,15 @@ def parse_job(envelope):
         raise ValueError("Invalid job JSON") from error
     if not isinstance(job, dict) or set(job) != {"repository", "baseSha", "task"}:
         raise ValueError("Invalid job fields")
-    if job["repository"] != "TeroTS/factory-smoke-test":
+    authorized = os.environ.get("AUTHORIZED_REPOSITORY", "")
+    target = os.environ.get("PR_TARGET_BRANCH", "")
+    if (
+        not re.fullmatch(r"[A-Za-z0-9-]+/[A-Za-z0-9_.-]+", authorized)
+        or authorized.split("/")[-1] in (".", "..")
+        or not target.strip()
+    ):
+        raise ValueError("Missing or invalid repository authorization configuration")
+    if not isinstance(job["repository"], str) or job["repository"] != authorized:
         raise ValueError("Unapproved repository")
     if not isinstance(job["baseSha"], str) or not re.fullmatch(
         r"[0-9a-fA-F]{40}", job["baseSha"]

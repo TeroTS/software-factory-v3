@@ -1,5 +1,6 @@
 import http.client
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -11,14 +12,23 @@ from unittest.mock import call, patch
 from worker.server import HOOK, Runtime, make_server, parse_job
 
 JOB = {
-    "repository": "TeroTS/factory-smoke-test",
+    "repository": "example/authorized-project",
     "baseSha": "a" * 40,
-    "task": "add multiply",
+    "task": "Update the greeting",
 }
 
 
 class LifecycleTests(unittest.TestCase):
     def setUp(self):
+        configuration = patch.dict(
+            os.environ,
+            {
+                "AUTHORIZED_REPOSITORY": JOB["repository"],
+                "PR_TARGET_BRANCH": "release",
+            },
+        )
+        configuration.start()
+        self.addCleanup(configuration.stop)
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.runtime = Runtime(self.directory.name)
@@ -53,7 +63,7 @@ class LifecycleTests(unittest.TestCase):
             self.assertEqual(self.request("POST", HOOK + "validate")[0], 503)
 
     # Rejects malformed, out-of-scope, or oversized job payloads before execution,
-    # enforcing the fixed demonstration inputs and run-hook size limit.
+    # enforcing configuration authorization and the run-hook size limit.
     def test_invalid_envelopes_never_start_worker(self):
         for envelope in (
             {},
@@ -77,6 +87,30 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(
             parse_job({"microvmId": "test", "runHookPayload": json.dumps(JOB)}), JOB
         )
+
+    def test_authorization_configuration_fails_closed(self):
+        envelope = {"microvmId": "test", "runHookPayload": json.dumps(JOB)}
+        for settings in (
+            {},
+            {"AUTHORIZED_REPOSITORY": JOB["repository"]},
+            {"AUTHORIZED_REPOSITORY": "../project", "PR_TARGET_BRANCH": "release"},
+            {"AUTHORIZED_REPOSITORY": "example/..", "PR_TARGET_BRANCH": "release"},
+            {"AUTHORIZED_REPOSITORY": JOB["repository"], "PR_TARGET_BRANCH": " "},
+        ):
+            with (
+                self.subTest(settings=settings),
+                patch.dict(os.environ, settings, clear=True),
+                self.assertRaisesRegex(ValueError, "authorization configuration"),
+            ):
+                parse_job(envelope)
+        for repository in (None, [], "example/other", "../project"):
+            with self.subTest(repository=repository), self.assertRaises(ValueError):
+                parse_job(
+                    {
+                        **envelope,
+                        "runHookPayload": json.dumps({**JOB, "repository": repository}),
+                    }
+                )
 
     # Accepts one asynchronous job, rejects a duplicate launch, and preserves its
     # terminal result through termination as required by the stable status contract.

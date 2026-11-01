@@ -14,7 +14,7 @@ paths:
     get:
       operationId: getStatus
       summary: Read the current job status
-      description: 'Return the current job status: pending, ok, or error.'
+      description: 'Return pending, ok, or error. ok requires independent repository script verification and matching committed Git/PR publication; it does not prove task correctness, test adequacy, or verification-before-publication.'
       security:
         - MicrovmProxyAuth: []
       parameters:
@@ -167,7 +167,7 @@ components:
         repository:
           type: string
           minLength: 1
-          description: Configuration-authorized GitHub repository in owner/name format.
+          description: GitHub repository in owner/name format; must exactly match deployment-supplied AUTHORIZED_REPOSITORY. Missing authorization fails closed.
         baseSha:
           type: string
           minLength: 1
@@ -176,7 +176,7 @@ components:
           type: string
           minLength: 1
           description: Approved nonblank coding task.
-      description: Job input; authorization and PR target are deployment-controlled. No secrets.
+      description: Job input; AUTHORIZED_REPOSITORY and PR_TARGET_BRANCH are deployment-controlled environment settings, not Job fields. No secrets.
   responses:
     HookNotReady:
       description: Not ready; AWS retries until the build-hook timeout. Body unspecified.

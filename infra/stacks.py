@@ -85,6 +85,22 @@ class Image(Stack):
             ),
             **kwargs,
         )
+        repository = CfnParameter(
+            self,
+            "AuthorizedRepository",
+            type="String",
+            default="TeroTS/factory-smoke-test",
+            allowed_pattern=r"[A-Za-z0-9-]+/[A-Za-z0-9_.-]+",
+            description="Trusted repository matching the existing repository-scoped GitHub secret; changes require trust/scoping review.",
+        )
+        target = CfnParameter(
+            self,
+            "PrTargetBranch",
+            type="String",
+            default="main",
+            min_length=1,
+            description="PR target branch in the authorized repository.",
+        )
         log_group = logs.LogGroup(
             self,
             "Logs",
@@ -177,6 +193,8 @@ class Image(Stack):
                     key=key, value=value
                 )
                 for key, value in (
+                    ("AUTHORIZED_REPOSITORY", repository.value_as_string),
+                    ("PR_TARGET_BRANCH", target.value_as_string),
                     ("GITHUB_SECRET_ARN", SECRET),
                     ("EXPECTED_RUNTIME_ROLE", self.runtime.role_name),
                 )

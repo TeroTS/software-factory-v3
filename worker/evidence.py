@@ -2,7 +2,7 @@
 import ast
 import shlex
 
-TEST_COMMAND = "python3 -m unittest discover -s tests -v"
+TEST_COMMAND = "./scripts/verify"
 
 
 # Extract the actual standalone shell command from Codex's command-execution event.
@@ -160,15 +160,15 @@ def verify_source(baseline, current):
                 raise ValueError("No added tests")
 
 
-# Check one agent-published, unmerged PR against verified Git branch/head and pinned main.
-def verify_pr(prs, branch, head, base):
+# Check one open, unmerged PR against verified Git branch/head, pinned base, and configured target.
+def verify_pr(prs, branch, head, base, target):
     if len(prs) != 1:
         raise ValueError("Expected exactly one PR on task branch")
     pr = prs[0]
     expected = {
         "state": "OPEN",
         "mergedAt": None,
-        "baseRefName": "main",
+        "baseRefName": target,
         "headRefName": branch,
         "headRefOid": head,
         "baseRefOid": base,

@@ -81,7 +81,29 @@ Authoritative contract: this section.
 
 No additional Job fields or script-specific JSON request payload are defined.
 Setup and test tooling belong to the target repository scripts, not hardcoded
-factory test commands or calculator acceptance checks.
+factory test commands or calculator acceptance checks. Scripts use executable
+files with an appropriate interpreter/shebang; the worker invokes each path
+directly, without a shell wrapper, from the repository root. Scripts own their
+dependency installation and must propagate failures as nonzero exit codes.
+
+### Authorization configuration
+
+The worker requires these environment settings supplied by infrastructure,
+not by the Job or cloned repository:
+
+| Setting | Meaning |
+| --- | --- |
+| `AUTHORIZED_REPOSITORY` | One trusted GitHub repository in `owner/name` format; Job `repository` must match exactly. Missing or invalid authorization fails closed before credential retrieval or work. |
+| `PR_TARGET_BRANCH` | Nonblank target branch for publication; Git validates the branch name before scripts or Codex run. The unique task branch must differ from this target. |
+| `GITHUB_SECRET_ARN` | Existing deployment-controlled secret holding the GitHub token scoped to that authorized repository. Job input cannot select a secret. |
+
+Native CDK image parameters `AuthorizedRepository` and `PrTargetBranch` supply
+the first two settings. Their defaults retain the original demonstration
+repository and `main`; changing configuration does not grant token permissions.
+Another live repository requires explicit trust/scoping review and separately
+authorized configuration/deployment. Repository scripts execute with access to
+the runtime role and GitHub token; Codex's sandbox does not remove that exposure.
+No allowlist, multi-repository token, or Job-supplied authorization is defined.
 
 ### Response
 
@@ -98,7 +120,8 @@ factory test commands or calculator acceptance checks.
 | Script availability | Both paths must exist and be executable. Missing or non-executable scripts fail explicitly. |
 | Worker-side failure | Setup, baseline verification, or independent final verification failure is terminal; setup/baseline failure prevents Codex invocation. |
 | Agent-side test failure | Codex diagnoses, fixes, and reruns failing verification within its one invocation; no agent restart or whole-Job rerun. |
-| Completion | Independent final verification is necessary but not sufficient. Automated completion guarantees and limitations are defined in [SPEC.md](../SPEC.md). |
+| Completion | Independent final verification with actual exit code `0`, nonempty committed changes descended from the pinned baseline, clean workspace, matching task branch/remote head, and exactly one open unmerged PR matching the configured target and verified commits are required. |
+| Automated limits | The worker does not check calculator behavior, preserve baseline ASTs, or validate command chronology. It instructs Codex to verify before publication, but independent verification afterward does not prove that ordering or protect against weakened tests. Human GitHub review judges correctness and test adequacy; success does not authorize merging. |
 | Repository authorization | Read `openapi.yaml#/components/schemas/Job`; supplying a repository string does not grant access. Script code can access runtime credentials. Another repository requires explicit trust/scoping review under [DECISIONS.md](../DECISIONS.md#data--state--ownership-decisions); existing credentials must not silently gain broader scope. |
 
 ## Sequence diagrams

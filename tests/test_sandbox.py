@@ -70,7 +70,11 @@ class SandboxTests(unittest.TestCase):
             finally:
                 timer.cancel()
                 process.terminate()
-                process.communicate(timeout=5)
+                try:
+                    process.communicate(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.communicate(timeout=5)
 
     # Managed policy wins over even trusted project/user/session settings on the pinned CLI.
     def test_factory_config_loading_and_override_precedence(self):

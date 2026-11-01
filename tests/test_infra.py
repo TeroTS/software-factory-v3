@@ -114,6 +114,28 @@ class InfrastructureTests(unittest.TestCase):
                 )
             )
 
+    def test_repository_authorization_and_target_are_deployment_controlled(self):
+        template = self.image_template.to_json()
+        self.assertEqual(
+            template["Parameters"]["AuthorizedRepository"]["Default"],
+            "TeroTS/factory-smoke-test",
+        )
+        self.assertEqual(template["Parameters"]["PrTargetBranch"]["Default"], "main")
+        self.image_template.has_resource_properties(
+            "AWS::Lambda::MicrovmImage",
+            {
+                "EnvironmentVariables": Match.array_with(
+                    [
+                        {
+                            "Key": "AUTHORIZED_REPOSITORY",
+                            "Value": {"Ref": "AuthorizedRepository"},
+                        },
+                        {"Key": "PR_TARGET_BRANCH", "Value": {"Ref": "PrTargetBranch"}},
+                    ]
+                )
+            },
+        )
+
     def test_staged_image_contains_pinned_runtime_dependencies(self):
         from infra.stacks import stage_source
 

@@ -12,11 +12,9 @@ from pathlib import Path
 import boto3
 from botocore.config import Config
 
-from worker.evidence import TEST_COMMAND, verify_events, verify_pr, verify_source
+from worker.evidence import verify_pr
 from worker.server import parse_job
 
-FILES = ("calculator.py", "tests/test_calculator.py")
-ACCEPTANCE = Path(__file__).resolve().parents[1] / "image/acceptance.py"
 CODEX_CONFIG = Path("/etc/codex/managed_config.toml")
 AWS_CONFIG = Config(
     connect_timeout=5,
@@ -126,6 +124,7 @@ def run_agent(args, prompt, cwd, env, secrets):
     process.stdin.close()
     events = []
     malformed = False
+    failed = False
     for line in process.stdout:
         try:
             event = json.loads(line)
@@ -151,6 +150,7 @@ def run_agent(args, prompt, cwd, env, secrets):
                     flush=True,
                 )
         if event.get("type") in ("error", "turn.failed"):
+            failed = True
             print(
                 redact(
                     str(event.get("message", event.get("error", "Agent turn failed"))),
@@ -160,29 +160,27 @@ def run_agent(args, prompt, cwd, env, secrets):
             )
     process.stdout.close()
     code = process.wait()
-    if code != 0 or malformed:
+    if code != 0 or malformed or failed:
         raise ValueError("Codex process or event stream failed")
     return events
 
 
-# Give the same agent the fixed task, sandbox probe, recovery rules, and ordered publication proof.
-def prompt_for(job, branch):
+# Give one agent the approved task, script contract, sandbox probe, and configured publication target.
+def prompt_for(job, branch, target):
     return f"""Work only in {job["repository"]} at pinned baseline {job["baseSha"]} on branch {branch}.
 Task: {job["task"]}
-Your FIRST shell command must be exactly: printf gate2-shell-ok
+Your FIRST shell command must be exactly: printf factory-shell-ok
 Stop on failure of this initial sandbox check, sandbox enforcement, model authentication or inference.
 After the check, recover ordinary command failures with installed equivalents within this same invocation.
 Diagnose/fix/rerun failing tests in this same invocation; no agent restart, whole-task rerun, provider/model change or sandbox removal.
-Add multiply(a, b) and unittest cases for positive, negative and zero operands, preserving addition and all baseline tests.
-Required cases: multiply(2,3)==6, multiply(-2,3)==-6, multiply(-2,-3)==6, zero in either operand position.
-Change only calculator.py and tests/test_calculator.py; do not modify deployment configuration or weaken tests.
-Inspect a meaningful nonempty source/test diff. Run final approved tests as a standalone command exactly:
-{TEST_COMMAND}
-Only after that command exits 0, run separate standalone commands in this order: git commit, git push, gh pr create.
-Commit on {branch}; push only that branch to origin and create one PR targeting main, left unmerged.
+Implement the requested task and appropriate tests; do not weaken tests or modify deployment configuration.
+Inspect the nonempty diff for correctness and test adequacy. Run final verification from the repository root:
+./scripts/verify
+Only after it exits 0, commit, push, and run gh pr create in this same invocation.
+Commit on {branch}; push only that branch to origin and create one PR targeting {target}, left unmerged.
 On publication timeout, inspect the existing remote branch/PR before retrying in this same invocation to avoid duplicates.
 Use a standalone git ls-remote to confirm a timed-out push, or gh pr view/list to confirm a timed-out PR creation.
-Never push directly to main, merge a PR, display credentials, change AWS configuration, or include secret values in output.
+Never push directly to {target}, merge a PR, display credentials, change AWS configuration, or include secret values in output.
 Stop on unrecoverable failure. Your prose final response or successful process exit is not completion evidence.
 """
 
@@ -214,7 +212,7 @@ def prepare_environment(secrets):
     return env, initial_access
 
 
-# Clone/test the pinned Job baseline; return repository, unique branch, and source/test evidence.
+# Clone the pinned authorized repository; run setup and baseline verification, returning path and task branch.
 def prepare_repository(job, env, secrets):
     root = Path(env["WORKSPACE"])
     root.mkdir(parents=True, exist_ok=True)
@@ -232,7 +230,14 @@ def prepare_repository(job, env, secrets):
         secrets,
     )
     logged(["git", "checkout", "--detach", job["baseSha"]], repository, env, secrets)
+    capture(
+        ["git", "check-ref-format", "--branch", env["PR_TARGET_BRANCH"]],
+        repository,
+        env,
+    )
     branch = "factory/task-" + uuid.uuid4().hex
+    if branch == env["PR_TARGET_BRANCH"]:
+        raise ValueError("Task branch matches configured PR target")
     logged(["git", "switch", "-c", branch], repository, env, secrets)
     capture(["git", "config", "user.name", "Software Factory PoC"], repository, env)
     capture(
@@ -240,12 +245,14 @@ def prepare_repository(job, env, secrets):
         repository,
         env,
     )
-    baseline = {
-        name: capture(["git", "show", job["baseSha"] + ":" + name], repository, env)
-        for name in FILES
-    }
-    logged(TEST_COMMAND.split(), repository, env, secrets)
-    return repository, branch, baseline
+    for script in ("./scripts/setup", "./scripts/verify"):
+        path = repository / script
+        if not path.is_file() or not os.access(path, os.X_OK):
+            print("Missing or non-executable repository script: " + script, flush=True)
+            raise ValueError("Missing or non-executable repository script: " + script)
+    logged(["./scripts/setup"], repository, env, secrets)
+    logged(["./scripts/verify"], repository, env, secrets)
+    return repository, branch
 
 
 # Enforce the pinned Codex invocation for this Job/branch; return streamed events or propagate failure.
@@ -266,15 +273,36 @@ def invoke_agent(job, repository, branch, env, secrets):
         str(repository / ".git"),
         "-",
     ]
-    return run_agent(args, prompt_for(job, branch), repository, env, secrets)
+    events = run_agent(
+        args, prompt_for(job, branch, env["PR_TARGET_BRANCH"]), repository, env, secrets
+    )
+    commands = [
+        event["item"]
+        for event in events
+        if event.get("type") == "item.completed"
+        and event.get("item", {}).get("type") == "command_execution"
+    ]
+    if (
+        not commands
+        or commands[0].get("exit_code") != 0
+        or "factory-shell-ok" not in commands[0].get("aggregated_output", "")
+    ):
+        raise ValueError("Initial sandbox shell did not pass")
+    return events
 
 
-# Independently check agent events, tests, baseline changes, Git and PR; reject incomplete publication.
-def verify_completion(job, repository, branch, baseline, events, env, secrets):
-    verify_events(events)
-    print("Independently verify approved final tests and changes", flush=True)
-    logged(TEST_COMMAND.split(), repository, env, secrets)
-    logged([sys.executable, str(ACCEPTANCE), str(repository)], repository, env, secrets)
+# Independently verify scripts and Git/PR consistency; human review judges correctness, not publication chronology.
+def verify_completion(job, repository, branch, env, secrets):
+    print("Independently verify repository script and publication", flush=True)
+    path = repository / "scripts/verify"
+    if not path.is_file() or not os.access(path, os.X_OK):
+        print(
+            "Missing or non-executable repository script: ./scripts/verify", flush=True
+        )
+        raise ValueError(
+            "Missing or non-executable repository script: ./scripts/verify"
+        )
+    logged(["./scripts/verify"], repository, env, secrets)
     head = capture(["git", "rev-parse", "HEAD"], repository, env).strip()
     if (
         head == job["baseSha"]
@@ -290,13 +318,8 @@ def verify_completion(job, repository, branch, baseline, events, env, secrets):
     changes = capture(
         ["git", "diff", "--name-only", job["baseSha"], head], repository, env
     ).splitlines()
-    if set(changes) != set(FILES):
-        raise ValueError("Missing source/tests or unexpected deployment changes")
-    current = {
-        name: capture(["git", "show", head + ":" + name], repository, env)
-        for name in FILES
-    }
-    verify_source(baseline, current)
+    if not changes:
+        raise ValueError("Missing nonempty committed change")
     remote = capture(
         ["git", "ls-remote", "--heads", "origin", branch], repository, env
     ).split()
@@ -321,7 +344,7 @@ def verify_completion(job, repository, branch, baseline, events, env, secrets):
             env,
         )
     )
-    verify_pr(prs, branch, head, job["baseSha"])
+    verify_pr(prs, branch, head, job["baseSha"], env["PR_TARGET_BRANCH"])
 
 
 # Validate and coordinate one Job's stages; require final scoped credentials before successful exit.
@@ -329,9 +352,9 @@ def execute(job):
     job = parse_job({"microvmId": "runtime", "runHookPayload": json.dumps(job)})
     secrets = []
     env, initial_access = prepare_environment(secrets)
-    repository, branch, baseline = prepare_repository(job, env, secrets)
-    events = invoke_agent(job, repository, branch, env, secrets)
-    verify_completion(job, repository, branch, baseline, events, env, secrets)
+    repository, branch = prepare_repository(job, env, secrets)
+    invoke_agent(job, repository, branch, env, secrets)
+    verify_completion(job, repository, branch, env, secrets)
     print("Rediscover scoped runtime credentials after completion", flush=True)
     refreshed_access = credentials(env, secrets)
     print(
@@ -340,7 +363,7 @@ def execute(job):
         flush=True,
     )
     print(
-        "Verified passing tests, preserved source/tests, baseline ancestry and one agent-published unmerged PR",
+        "Verified repository script, nonempty commit, baseline ancestry and one agent-published unmerged PR; human correctness review required",
         flush=True,
     )
 

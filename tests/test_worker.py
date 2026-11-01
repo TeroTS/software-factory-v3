@@ -21,7 +21,7 @@ class CalculatorTests(unittest.TestCase):
     def test_add(self):
         self.assertEqual(add(2, 3), 5)
 """
-COMMAND = "python3 -m unittest discover -s tests -v"
+COMMAND = "./scripts/verify"
 
 
 def event(command, code=0, output=""):
@@ -158,7 +158,7 @@ class EvidenceTests(unittest.TestCase):
             "headRefOid": "b" * 40,
             "baseRefOid": "a" * 40,
         }
-        self.evidence.verify_pr([pr], "factory/task-test", "b" * 40, "a" * 40)
+        self.evidence.verify_pr([pr], "factory/task-test", "b" * 40, "a" * 40, "main")
         for changes in (
             {"state": "CLOSED"},
             {"mergedAt": "now"},
@@ -168,10 +168,12 @@ class EvidenceTests(unittest.TestCase):
         ):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 self.evidence.verify_pr(
-                    [{**pr, **changes}], "factory/task-test", "b" * 40, "a" * 40
+                    [{**pr, **changes}], "factory/task-test", "b" * 40, "a" * 40, "main"
                 )
         with self.assertRaises(ValueError):
-            self.evidence.verify_pr([pr, pr], "factory/task-test", "b" * 40, "a" * 40)
+            self.evidence.verify_pr(
+                [pr, pr], "factory/task-test", "b" * 40, "a" * 40, "main"
+            )
 
 
 class WorkerTests(unittest.TestCase):
@@ -196,30 +198,43 @@ class WorkerTests(unittest.TestCase):
         self.root = Path(self.directory.name)
         self.origin = self.root / "origin"
         (self.origin / "tests").mkdir(parents=True)
-        (self.origin / "calculator.py").write_text(BASE)
-        (self.origin / "tests/test_calculator.py").write_text(TESTS)
+        (self.origin / "greeting.txt").write_text("hello\n")
+        (self.origin / "scripts").mkdir()
+        (self.origin / "scripts/setup").write_text(
+            "#!/bin/sh\nprintf 'setup-passed\\n'\n"
+        )
+        (self.origin / "scripts/verify").write_text(
+            "#!/bin/sh\nset -e\ntest -s greeting.txt\nprintf 'verify-passed\\n'\n"
+        )
+        for script in ("setup", "verify"):
+            (self.origin / "scripts" / script).chmod(0o755)
         self.env = {
             **os.environ,
             "WORKSPACE": str(self.root / "workspace"),
             "EXPECTED_RUNTIME_ROLE": "software-factory-poc-runtime",
             "GITHUB_SECRET_ARN": "secret-arn",
+            "AUTHORIZED_REPOSITORY": "example/authorized-project",
+            "PR_TARGET_BRANCH": "release",
             "GIT_CONFIG_GLOBAL": os.devnull,
             "GIT_CONFIG_SYSTEM": os.devnull,
         }
-        self.git("init", "-b", "main")
+        self.git("init", "-b", "release")
         self.git("config", "user.email", "fixture@example.invalid")
         self.git("config", "user.name", "Fixture")
         self.git("add", ".")
         self.git("commit", "-m", "baseline")
         self.sha = self.git("rev-parse", "HEAD").strip()
         self.job = {
-            "repository": "TeroTS/factory-smoke-test",
+            "repository": "example/authorized-project",
             "baseSha": self.sha,
-            "task": "add multiply",
+            "task": "Update the greeting",
         }
         self.prs = []
         self.agent_calls = 0
-        self.clone_url = "https://github.com/TeroTS/factory-smoke-test.git"
+        self.clone_url = "https://github.com/example/authorized-project.git"
+        environment_patch = patch.dict(os.environ, self.env)
+        environment_patch.start()
+        self.addCleanup(environment_patch.stop)
         self.sdk()
         self.client_patch = patch("boto3.client", side_effect=self.sdk_client)
         self.client_mock = self.client_patch.start()
@@ -347,15 +362,12 @@ class WorkerTests(unittest.TestCase):
         self.assertIn("gh pr create", prompt)
         self.assertNotIn(env["GH_TOKEN"], prompt)
         self.assertIn("same invocation", prompt)
-        (cwd / "calculator.py").write_text(
-            BASE + "\ndef multiply(a, b):\n    return a * b\n"
-        )
-        (cwd / "tests/test_calculator.py").write_text(
-            TESTS.replace(
-                "from calculator import add", "from calculator import add, multiply"
-            )
-            + "\n    # Covers positive, negative, and zero products to satisfy demonstration acceptance.\n    def test_multiply(self):\n        self.assertEqual(multiply(2, 3), 6)\n        self.assertEqual(multiply(-2, 3), -6)\n        self.assertEqual(multiply(-2, -3), 6)\n        self.assertEqual(multiply(0, 3), 0)\n        self.assertEqual(multiply(3, 0), 0)\n"
-        )
+        self.assertIn("./scripts/verify", prompt)
+        self.assertIn("targeting release", prompt)
+        self.assertNotIn("calculator", prompt)
+        self.assertNotIn("multiply", prompt)
+        (cwd / "greeting.txt").write_text("hello world\n")
+        self.external(["./scripts/verify"], cwd, env)
         for cmd in (
             ["git", "add", "."],
             ["git", "commit", "-m", "task"],
@@ -369,19 +381,14 @@ class WorkerTests(unittest.TestCase):
                 "number": 2,
                 "state": "OPEN",
                 "mergedAt": None,
-                "baseRefName": "main",
+                "baseRefName": "release",
                 "headRefName": branch,
                 "headRefOid": head,
                 "baseRefOid": self.sha,
             }
         ]
-        return [
-            event("printf gate2-shell-ok", output="gate2-shell-ok"),
-            event(COMMAND),
-            event("git commit -m task"),
-            event("git push origin " + branch),
-            event("gh pr create --base main"),
-        ]
+        # Chronology is deliberately not supplied: generic completion checks Git/PR and scripts.
+        return [event("printf factory-shell-ok", output="factory-shell-ok")]
 
     # Missing image policy must fail before invoking the agent rather than loading unsafe defaults.
     def test_missing_factory_configuration_stops_before_agent(self):
@@ -448,7 +455,7 @@ class WorkerTests(unittest.TestCase):
             ],
         )
         env, initial_access = results["prepare_environment"]
-        repository, branch, baseline = results["prepare_repository"]
+        repository, branch = results["prepare_repository"]
         secrets = calls[0][1][0]
         self.assertEqual(initial_access, "ASIA" + "X" * 16)
         self.assertEqual(calls[2][1], (self.job, env, secrets))
@@ -459,8 +466,6 @@ class WorkerTests(unittest.TestCase):
                 self.job,
                 repository,
                 branch,
-                baseline,
-                results["invoke_agent"],
                 env,
                 secrets,
             ),
@@ -495,7 +500,7 @@ class WorkerTests(unittest.TestCase):
                         raise ValueError("secret-value")
                     return {
                         "prepare_environment": ({}, "initial-access"),
-                        "prepare_repository": (self.root, "branch", {}),
+                        "prepare_repository": (self.root, "branch"),
                         "invoke_agent": [],
                     }.get(name)
 
@@ -513,7 +518,7 @@ class WorkerTests(unittest.TestCase):
                 self.assertEqual(self.task.main(), 1)
                 self.assertEqual(calls, list(stages[: stages.index(failed) + 1]))
                 self.assertNotIn("secret-value", logs.getvalue())
-                self.assertNotIn("Verified passing tests", logs.getvalue())
+                self.assertNotIn("Verified repository script", logs.getvalue())
 
     # Fails an unavailable pinned baseline before any agent call or PR, protecting
     # the controlled-failure demonstration from unintended model use or publication.
@@ -529,8 +534,8 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(self.agent_calls, 0)
         self.assertEqual(self.prs, [])
 
-    # Rejects an agent result with no command history because successful execution
-    # alone cannot prove testing and publication under the completion rules.
+    # Rejects an agent result without the initial sandbox probe; process exit alone
+    # does not satisfy probe, independent script, or Git/PR checks.
     def test_agent_exit_without_command_evidence_is_not_success(self):
         with (
             patch.dict(os.environ, self.env),
@@ -646,9 +651,9 @@ class WorkerTests(unittest.TestCase):
     def test_contradictory_independent_git_and_pr_evidence_rejects_success(self):
         replies = (
             (["git", "ls-remote"], "wrong refs/heads/task"),
-            (["git", "status"], " M calculator.py"),
-            (["git", "diff"], "calculator.py\ntests/test_calculator.py\ndeploy.yml\n"),
-            (["git", "branch"], "main\n"),
+            (["git", "status"], " M greeting.txt"),
+            (["git", "diff"], ""),
+            (["git", "branch"], "release\n"),
             (["git", "rev-parse"], self.sha + "\n"),
             (["gh", "pr"], "[]"),
         )
@@ -706,7 +711,7 @@ class WorkerTests(unittest.TestCase):
         code = (
             "import json,sys; sys.stdin.read(); print(json.dumps("
             + repr(events[0])
-            + ')); print("{\\"type\\":\\"error\\",\\"message\\":\\"session-token\\"}")'
+            + ')); print(json.dumps({"type":"item.completed","item":{"type":"command_execution","aggregated_output":"session-token"}}))'
         )
         with contextlib.redirect_stdout(io.StringIO()) as logs:
             result = self.task.run_agent(
@@ -721,6 +726,7 @@ class WorkerTests(unittest.TestCase):
         for code in (
             "import sys; sys.stdin.read(); sys.exit(1)",
             'import sys; sys.stdin.read(); print("bad-json")',
+            'import sys; sys.stdin.read(); print(\'{"type":"turn.failed","error":"session-token"}\')',
         ):
             with (
                 contextlib.redirect_stdout(io.StringIO()),
@@ -743,15 +749,170 @@ class WorkerTests(unittest.TestCase):
             ),
         }
         code = "import sys; sys.stdin.read(); print(" + repr(json.dumps(error)) + ")"
-        with contextlib.redirect_stdout(io.StringIO()) as logs:
+        with (
+            contextlib.redirect_stdout(io.StringIO()) as logs,
+            self.assertRaises(ValueError),
+        ):
             self.task.run_agent(
                 [os.sys.executable, "-c", code], "prompt", self.root, self.env, []
             )
         self.assertNotIn("rotated-private-value", logs.getvalue())
         self.assertNotIn("rotated-session-value", logs.getvalue())
 
-    # Rejects correct multiplication backed only by a positive-operand test,
-    # enforcing the required negative and zero coverage in the submitted tests.
+    def test_scripts_fail_before_agent_for_missing_nonexecutable_and_nonzero(self):
+        for index, (script, failure) in enumerate(
+            (script, failure)
+            for script in ("setup", "verify")
+            for failure in ("missing", "nonexecutable", "nonzero")
+        ):
+            self.sdk()
+            path = self.origin / "scripts" / script
+            original = path.read_text()
+            if failure == "missing":
+                path.unlink()
+            elif failure == "nonexecutable":
+                path.chmod(0o644)
+            else:
+                path.write_text(
+                    "#!/bin/sh\necho github_pat_synthetic_token >&2\nexit 7\n"
+                )
+            self.git("add", ".")
+            self.git("commit", "-m", "script failure")
+            sha = self.git("rev-parse", "HEAD").strip()
+            env = {**self.env, "WORKSPACE": str(self.root / ("script-" + str(index)))}
+            with (
+                self.subTest(script=script, failure=failure),
+                patch.dict(os.environ, env),
+                patch.object(self.task, "capture", side_effect=self.external),
+                patch.object(self.task, "run_agent", side_effect=self.agent),
+                contextlib.redirect_stdout(io.StringIO()) as logs,
+                self.assertRaises(
+                    (ValueError, subprocess.CalledProcessError)
+                ) as failure_result,
+            ):
+                self.task.execute({**self.job, "baseSha": sha})
+            if failure == "nonzero":
+                self.assertEqual(failure_result.exception.returncode, 7)
+            else:
+                self.assertIsInstance(failure_result.exception, ValueError)
+                self.assertIn("./scripts/" + script, str(failure_result.exception))
+                self.assertIn(
+                    "Missing or non-executable repository script: ./scripts/" + script,
+                    logs.getvalue(),
+                )
+            self.assertEqual(self.agent_calls, 0)
+            self.assertEqual(self.prs, [])
+            self.assertNotIn("github_pat_synthetic_token", logs.getvalue())
+            path.write_text(original)
+            path.chmod(0o755)
+
+    def test_final_verification_failure_rejects_published_work(self):
+        def agent(*args):
+            result = self.agent(*args)
+            repository = args[2]
+            (repository / "greeting.txt").write_text("")
+            return result
+
+        with (
+            patch.object(self.task, "capture", side_effect=self.external),
+            patch.object(self.task, "run_agent", side_effect=agent),
+            contextlib.redirect_stdout(io.StringIO()),
+            self.assertRaises(subprocess.CalledProcessError),
+        ):
+            self.task.execute(self.job)
+        self.assertEqual(self.agent_calls, 1)
+        self.assertEqual(len(self.prs), 1)
+
+    def test_final_script_unavailable_rejects_published_work(self):
+        for index, failure in enumerate(("missing", "nonexecutable")):
+            self.sdk()
+
+            def agent(*args, failure=failure):
+                result = self.agent(*args)
+                script = args[2] / "scripts/verify"
+                if failure == "missing":
+                    script.unlink()
+                else:
+                    script.chmod(0o644)
+                return result
+
+            with (
+                self.subTest(failure=failure),
+                patch.dict(
+                    os.environ, {"WORKSPACE": str(self.root / ("final-" + str(index)))}
+                ),
+                patch.object(self.task, "capture", side_effect=self.external),
+                patch.object(self.task, "run_agent", side_effect=agent),
+                contextlib.redirect_stdout(io.StringIO()) as logs,
+                self.assertRaisesRegex(ValueError, "Missing or non-executable"),
+            ):
+                self.task.execute(self.job)
+            self.assertIn(
+                "Missing or non-executable repository script: ./scripts/verify",
+                logs.getvalue(),
+            )
+            self.assertEqual(len(self.prs), 1)
+
+    def test_sandbox_probe_failure_stops_before_completion(self):
+        for events in (
+            [],
+            [event("printf factory-shell-ok", 1, "factory-shell-ok")],
+            [event("echo other", output="other")],
+        ):
+            with (
+                self.subTest(events=events),
+                patch.object(self.task, "capture", side_effect=self.external),
+                patch.object(self.task, "run_agent", return_value=events),
+                self.assertRaisesRegex(ValueError, "Initial sandbox shell"),
+            ):
+                self.task.invoke_agent(self.job, self.origin, "branch", self.env, [])
+
+    def test_invalid_target_branch_stops_before_scripts_or_agent(self):
+        with (
+            patch.dict(os.environ, {"PR_TARGET_BRANCH": "-invalid"}),
+            patch.object(self.task, "capture", side_effect=self.external),
+            patch.object(self.task, "run_agent") as agent,
+            contextlib.redirect_stdout(io.StringIO()),
+            self.assertRaises(subprocess.CalledProcessError),
+        ):
+            self.task.execute(self.job)
+        agent.assert_not_called()
+
+    def test_unauthorized_job_stops_before_credentials(self):
+        with (
+            patch.object(self.task, "prepare_environment") as prepare,
+            self.assertRaises(ValueError),
+        ):
+            self.task.execute({**self.job, "repository": "example/other"})
+        prepare.assert_not_called()
+
+    def test_script_order_and_independent_verification(self):
+        calls = []
+
+        def capture(args, cwd, env, secrets=None):
+            calls.append(args[0])
+            return self.external(args, cwd, env, secrets)
+
+        def agent(*args):
+            calls.append("agent")
+            return self.agent(*args)
+
+        with (
+            patch.object(self.task, "capture", side_effect=capture),
+            patch.object(self.task, "run_agent", side_effect=agent),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.task.execute(self.job)
+        self.assertEqual(
+            [
+                call
+                for call in calls
+                if call in ("./scripts/setup", "./scripts/verify", "agent")
+            ],
+            ["./scripts/setup", "./scripts/verify", "agent", "./scripts/verify"],
+        )
+
+    # Legacy acceptance tests remain dedicated to the obsolete module until US-12.
     def test_acceptance_requires_committed_tests_for_all_operand_categories(self):
         from image.acceptance import verify
 
@@ -770,6 +931,8 @@ class WorkerTests(unittest.TestCase):
     def test_independent_acceptance_rejects_wrong_multiplication(self):
         from image.acceptance import verify
 
+        (self.origin / "calculator.py").write_text(BASE)
+        (self.origin / "tests/test_calculator.py").write_text(TESTS)
         with self.assertRaises(AttributeError):
             verify(self.origin)
         (self.origin / "calculator.py").write_text(
