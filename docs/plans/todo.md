@@ -124,3 +124,73 @@
   Make live AWS/GitHub end-to-end runs explicit and separately authorized;
   document credentials, costs, cleanup, and how to run them. Do not deploy or
   create live resources as part of ordinary `make verify`.
+
+## 8. Simplify the VM lifecycle state plan
+
+- Remove per-execution image/version inspection states (`InspectImage`,
+  `ImageReady`, `InspectVersion`, `VersionReady`); deployment must supply a
+  validated, explicitly pinned image version. Preserve launch failure handling.
+- Keep image/version, execution role, networking, and logging deployment-controlled,
+  not job-controlled. Keep generated resource references supplied by CDK; the VM
+  ID and endpoint remain dynamic launch results.
+- Prefer higher-level `aws_cdk.aws_stepfunctions` constructs (`StateMachine`,
+  `Pass`, `Choice`, `Wait`, `Succeed`, and `Fail`) over hand-built ASL dictionaries
+  and the current low-level `CfnStateMachine`. Connect states explicitly rather
+  than maintaining transitions as state-name strings.
+- Use `aws_cdk.aws_stepfunctions_tasks` constructs for supported API and HTTP
+  integrations. Verify MicroVM and HTTP integration support in the pinned CDK
+  first; use `CustomState` only where the required integration cannot otherwise
+  be expressed adequately. Do not add compute or upgrade dependencies merely
+  to avoid a raw integration state.
+- Preserve explicit permissions, catches, result paths, timeouts, and token-safe
+  final output. Validate the synthesized ASL and update synthesis/transition tests;
+  higher-level constructs improve construction checks, not live-service guarantees
+  or the underlying state count.
+- Use the following state plan. API calls and decisions remain separate; do not
+  introduce extra compute just to combine states. Additional ASL bookkeeping or
+  result-routing states are acceptable where the platform requires them.
+
+1. **Input** — retain the job separately from lifecycle results.
+2. **LaunchVM** — launch using deployment configuration and the job.
+3. **CheckLaunch** — require a nonempty VM ID and endpoint. If only the endpoint
+   is missing, record failure and terminate the known VM; without a VM ID, fail
+   directly because explicit termination is unavailable.
+4. **WaitForVMToStart** — wait 5 seconds, then fetch fresh lifecycle state.
+5. **GetVMState** — call the lifecycle API.
+6. **IsVMRunning** — `RUNNING` goes to `GetWorkerToken`; `PENDING` returns to
+   `WaitForVMToStart`; any other state records failure and attempts termination.
+7. **GetWorkerToken** — obtain one authentication token for the worker.
+8. **CheckWorkerToken** — valid token goes to `PollWorker`; missing/invalid token
+   records failure and attempts termination.
+9. **PollWorker** — fetch a fresh `/status` response.
+10. **CheckWorkerStatus** — `pending` goes to `WaitForWorker`; `ok` goes to
+    `RecordSuccess`; `error`, invalid response, or polling failure goes to
+    `RecordFailure`. Worker completion is not merely server readiness.
+11. **WaitForWorker** — wait 10 seconds, then return to `PollWorker`, not a
+    decision over stale response data.
+12. **RecordSuccess** — retain the successful job outcome, then `TerminateVM`.
+13. **RecordFailure** — retain the failed job outcome/reason, then `TerminateVM`.
+14. **TerminateVM** — request termination after either job outcome; a termination
+    API failure goes to `JobFailed` with a cleanup-unconfirmed reason.
+15. **WaitForVMToTerminate** — wait 5 seconds, then fetch fresh lifecycle state.
+16. **GetTerminationState** — call the lifecycle API; API failure goes to
+    `JobFailed` with a cleanup-unconfirmed reason.
+17. **IsVMTerminated** — `TERMINATED` goes to `EndResult`; `TERMINATING` returns
+    to `WaitForVMToTerminate`; any other state goes to `JobFailed` with a
+    cleanup-unconfirmed reason.
+18. **EndResult** — expose VM ID, recorded job outcome, and confirmed termination,
+    excluding authentication tokens; route success to `JobSucceeded`, failure to
+    `JobFailed`. Split output shaping and routing into separate ASL states if needed.
+19. **JobSucceeded** — successful terminal state.
+20. **JobFailed** — failed terminal state; distinguish job failure from unconfirmed
+    termination through the error reason and retain a known VM ID for recovery.
+
+- "Cleanup" means states `TerminateVM` through `IsVMTerminated`, not a separate
+  state. Failures with a known VM ID enter this sequence via `RecordFailure`;
+  failures without an ID fail directly. Do not loop indefinitely on unexpected
+  lifecycle states or worker responses.
+- Preserve bounded execution and VM lifespan: workflow timeout or cancellation
+  can bypass termination states, so lifespan and manual recovery remain required.
+- Align accepted workflow requirements/documentation and update transition,
+  failure-path, and fresh-polling tests. Run focused tests, `make verify`, and
+  `make synth`; live deployment and end-to-end runs need separate authorization.
