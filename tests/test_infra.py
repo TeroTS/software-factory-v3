@@ -6,6 +6,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from aws_cdk import App, Environment
+from aws_cdk import aws_stepfunctions as sfn
+from aws_cdk import aws_stepfunctions_tasks as tasks
 from aws_cdk.assertions import Match, Template
 
 
@@ -168,6 +170,84 @@ class InfrastructureTests(unittest.TestCase):
             (root / "image/requirements.txt").read_bytes(),
         )
 
+    def test_workflow_uses_high_level_machine_without_image_inspection_permissions(
+        self,
+    ):
+        self.assertIsInstance(
+            self.workflow.node.find_child("Workflow"), sfn.StateMachine
+        )
+        self.assertEqual(
+            set(
+                self.workflow_template.find_resources(
+                    "AWS::StepFunctions::StateMachine"
+                )
+            ),
+            {"Workflow"},
+        )
+        text = json.dumps(self.workflow_template.to_json())
+        for removed in ("lambda:GetMicrovmImage", "lambda:GetMicrovmImageVersion"):
+            self.assertNotIn(removed, text)
+        self.assertNotIn('"Resource": "*"', text)
+        for name in (
+            "LaunchVM",
+            "GetVMState",
+            "GetWorkerToken",
+            "TerminateVM",
+            "GetTerminationState",
+        ):
+            self.assertIsInstance(
+                self.workflow.node.find_child(name), tasks.CallAwsService
+            )
+        raw_states = [
+            child
+            for child in self.workflow.node.children
+            if isinstance(child, sfn.CustomState)
+        ]
+        self.assertEqual([state.node.id for state in raw_states], ["PollWorker"])
+        statements = [
+            statement
+            for policy in self.workflow_template.find_resources(
+                "AWS::IAM::Policy"
+            ).values()
+            for statement in policy["Properties"]["PolicyDocument"]["Statement"]
+        ]
+        sdk = [
+            statement
+            for statement in statements
+            if isinstance(statement["Action"], str)
+            and statement["Action"].startswith("lambda:")
+            and statement["Action"] != "lambda:PassNetworkConnector"
+        ]
+        self.assertEqual(len(sdk), 4)
+        self.assertEqual(
+            {statement["Action"] for statement in sdk},
+            {
+                "lambda:RunMicrovm",
+                "lambda:GetMicrovm",
+                "lambda:CreateMicrovmAuthToken",
+                "lambda:TerminateMicrovm",
+            },
+        )
+        for statement in sdk:
+            self.assertEqual(
+                statement["Resource"],
+                self.workflow.resolve(self.image.image.attr_image_arn),
+            )
+        http = next(
+            statement
+            for statement in statements
+            if statement["Action"] == "states:InvokeHTTPEndpoint"
+        )
+        self.assertEqual(
+            http["Condition"],
+            {
+                "StringEquals": {"states:HTTPMethod": "GET"},
+                "StringLike": {
+                    "states:HTTPEndpoint": "https://*.lambda-microvm.us-east-1.on.aws/status"
+                },
+            },
+        )
+
     # Ensures synthesized cleanup preserves workflow state after a termination
     # request, so the VM ID remains available for confirming actual termination.
     def test_synthesized_termination_retains_vm_id_for_confirmation(self):
@@ -189,7 +269,7 @@ class InfrastructureTests(unittest.TestCase):
         )
         deployed = json.loads(text)
         self.assertEqual(
-            deployed["States"]["Terminate"].get("ResultPath"), "$.terminationRequest"
+            deployed["States"]["TerminateVM"].get("ResultPath"), "$.terminationRequest"
         )
 
     # Requires an operator-supplied image pin and a non-auth-overriding connection,
@@ -223,7 +303,6 @@ class InfrastructureTests(unittest.TestCase):
             "lambda:GetMicrovm",
             "lambda:CreateMicrovmAuthToken",
             "lambda:TerminateMicrovm",
-            "lambda:GetMicrovmImageVersion",
             "iam:PassRole",
             "events:RetrieveConnectionCredentials",
             "states:InvokeHTTPEndpoint",

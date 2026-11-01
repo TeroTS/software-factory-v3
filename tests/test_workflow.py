@@ -1,8 +1,13 @@
 import copy
-import importlib
 import json
 import re
+import tempfile
 import unittest
+
+from aws_cdk import App, Environment
+from aws_cdk.assertions import Template
+
+from infra.stacks import Artifacts, Image, Workflow
 
 
 class TaskError(Exception):
@@ -56,6 +61,8 @@ def choice(rule, data, context):
         return rule["IsPresent"]
     if "IsString" in rule:
         return isinstance(value, str) == rule["IsString"]
+    if "IsNumeric" in rule:
+        return (type(value) in (int, float)) == rule["IsNumeric"]
     if "StringMatches" in rule:
         # ASL supports only '*' as wildcard; shell '?' globs are literal here.
         pattern = re.escape(rule["StringMatches"]).replace(r"\*", ".*")
@@ -63,12 +70,16 @@ def choice(rule, data, context):
     return value == rule.get("StringEquals", rule.get("NumericEquals"))
 
 
-def simulate(definition, replies, limit=100):
-    data = {
-        "repository": "TeroTS/factory-smoke-test",
-        "baseSha": "a" * 40,
-        "task": "multiply",
-    }
+def simulate(definition, replies, limit=100, job=None):
+    data = (
+        job
+        if job is not None
+        else {
+            "repository": "example/authorized-project",
+            "baseSha": "a" * 40,
+            "task": "Update greeting and tests",
+        }
+    )
     context = {"Execution": {"Name": "same-execution"}}
     state = definition["StartAt"]
     calls, elapsed = [], 0
@@ -77,6 +88,10 @@ def simulate(definition, replies, limit=100):
         step = definition["States"][state]
         kind = step["Type"]
         if kind in ("Succeed", "Fail"):
+            if kind == "Fail":
+                # Fail paths must resolve on the shaped, token-free terminal state.
+                expression(step["ErrorPath"], data, context)
+                expression(step["CausePath"], data, context)
             return kind, data, calls, state
         if kind == "Choice":
             state = next(
@@ -101,7 +116,10 @@ def simulate(definition, replies, limit=100):
                     catch = step.get("Catch")
                     if not catch:
                         return "Fail", data, calls, state
-                    data[catch[0]["ResultPath"][2:]] = {"Error": "simulated"}
+                    data[catch[0]["ResultPath"][2:]] = {
+                        "Error": "simulated",
+                        "Cause": "secret-jwe",
+                    }
                     state = catch[0]["Next"]
                     continue
             else:
@@ -119,37 +137,90 @@ def simulate(definition, replies, limit=100):
 
 class WorkflowTests(unittest.TestCase):
     def setUp(self):
-        self.assertIsNotNone(
-            importlib.util.find_spec("infra.workflow"), "Workflow is missing"
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        app = App(outdir=directory.name)
+        env = Environment(account="172318459814", region="us-east-1")
+        artifacts = Artifacts(app, "Artifacts", env=env)
+        image = Image(app, "Image", artifact_bucket=artifacts.bucket_name, env=env)
+        workflow = Workflow(app, "Workflow", image=image, env=env)
+        resource = next(
+            iter(
+                Template.from_stack(workflow)
+                .find_resources("AWS::StepFunctions::StateMachine")
+                .values()
+            )
         )
-        from infra.workflow import definition
-
-        self.definition = definition(
-            "image-arn", "7.0", "role-arn", "connection-arn", "logs"
+        encoded = resource["Properties"]["DefinitionString"]
+        # Substitute only CloudFormation deployment references, never ASL expressions.
+        text = (
+            encoded
+            if isinstance(encoded, str)
+            else "".join(
+                piece if isinstance(piece, str) else "symbolic-value"
+                for piece in encoded["Fn::Join"][1]
+            )
         )
+        self.definition = json.loads(text)
         self.replies = {
-            "InspectImage": [{"State": "UPDATED"}],
-            "InspectVersion": [{"State": "SUCCESSFUL", "Status": "ACTIVE"}],
-            "Launch": [
+            "LaunchVM": [
                 {
                     "MicrovmId": "microvm-test",
                     "Endpoint": "vm.lambda-microvm.us-east-1.on.aws",
                 }
             ],
-            "Readiness": [{"State": "PENDING"}, {"State": "RUNNING"}],
-            "Token": [{"AuthToken": {"X-aws-proxy-auth": "secret-jwe"}}],
-            "Poll": [
+            "GetVMState": [{"State": "PENDING"}, {"State": "RUNNING"}],
+            "GetWorkerToken": [{"AuthToken": {"X-aws-proxy-auth": "secret-jwe"}}],
+            "PollWorker": [
                 {"StatusCode": 200, "ResponseBody": {"status": "pending"}},
                 {"StatusCode": 200, "ResponseBody": {"status": "ok"}},
             ],
-            "Terminate": [{}],
-            "Confirm": [{"State": "TERMINATING"}, {"State": "TERMINATED"}],
+            "TerminateVM": [{}],
+            "GetTerminationState": [{"State": "TERMINATING"}, {"State": "TERMINATED"}],
         }
 
-    # Rejects missing or unusable VM IDs with ASL wildcard semantics, preventing
-    # shell-glob assumptions from misrouting cleanup in the local simulation.
+    def test_simplified_plan_uses_fresh_polls_and_shared_termination(self):
+        states = self.definition["States"]
+        self.assertEqual(self.definition["StartAt"], "Input")
+        self.assertEqual(states["Input"]["Next"], "LaunchVM")
+        self.assertIn("reason", states["RecordFailure"].get("Parameters", {}))
+        for obsolete in (
+            "InspectImage",
+            "ImageReady",
+            "InspectVersion",
+            "VersionReady",
+        ):
+            self.assertNotIn(obsolete, states)
+        for wait, seconds, target in (
+            ("WaitForVMToStart", 5, "GetVMState"),
+            ("WaitForWorker", 10, "PollWorker"),
+            ("WaitForVMToTerminate", 5, "GetTerminationState"),
+        ):
+            self.assertEqual(states[wait]["Seconds"], seconds)
+            self.assertEqual(states[wait]["Next"], target)
+        for outcome in ("RecordSuccess", "RecordFailure"):
+            self.assertEqual(states[outcome]["Next"], "TerminateVM")
+        for name, operation in (
+            ("LaunchVM", "runMicrovm"),
+            ("GetVMState", "getMicrovm"),
+            ("GetWorkerToken", "createMicrovmAuthToken"),
+            ("PollWorker", None),
+            ("TerminateVM", "terminateMicrovm"),
+            ("GetTerminationState", "getMicrovm"),
+        ):
+            self.assertNotIn("Retry", states[name])
+            self.assertEqual(states[name]["Catch"][0]["ErrorEquals"], ["States.ALL"])
+            if operation:
+                self.assertTrue(
+                    states[name]["Resource"].endswith(
+                        "states:::aws-sdk:lambdamicrovms:" + operation
+                    )
+                )
+        self.assertEqual(self.definition["TimeoutSeconds"], 1680)
+        self.assertEqual(states["PollWorker"]["TimeoutSeconds"], 10)
+
     def test_known_vm_string_guard_matches_actual_asl_not_shell_globs(self):
-        rule = self.definition["States"]["KnownVM"]["Choices"][0]
+        rule = self.definition["States"]["CheckLaunch"]["Choices"][0]
         self.assertTrue(choice(rule, {"vm": {"MicrovmId": "microvm-real"}}, {}))
         for value in ("", None, 1):
             self.assertFalse(choice(rule, {"vm": {"MicrovmId": value}}, {}))
@@ -162,33 +233,82 @@ class WorkflowTests(unittest.TestCase):
             )
         )
 
-    # Completes one bounded job with authenticated polling and confirmed termination,
-    # protecting single-launch/token reuse and secret-free successful output.
     def test_success_reuses_one_token_and_confirms_cleanup(self):
-        kind, output, calls, _ = simulate(self.definition, self.replies)
-        self.assertEqual(kind, "Succeed")
+        kind, output, calls, final = simulate(self.definition, self.replies)
+        self.assertEqual((kind, final), ("Succeed", "JobSucceeded"))
         self.assertEqual(
             output,
-            {"microvmId": "microvm-test", "status": "ok", "termination": "TERMINATED"},
+            {
+                "microvmId": "microvm-test",
+                "status": "ok",
+                "termination": "TERMINATED",
+            },
         )
-        polls = [args for name, args in calls if name == "Poll"]
-        self.assertEqual(len(polls), 2)
-        self.assertEqual(polls[0]["Headers"], polls[1]["Headers"])
-        self.assertEqual(sum(name == "Token" for name, _ in calls), 1)
-        self.assertEqual(sum(name == "Launch" for name, _ in calls), 1)
-        launch = next(args for name, args in calls if name == "Launch")
+        self.assertEqual(
+            [name for name, _ in calls],
+            [
+                "LaunchVM",
+                "GetVMState",
+                "GetVMState",
+                "GetWorkerToken",
+                "PollWorker",
+                "PollWorker",
+                "TerminateVM",
+                "GetTerminationState",
+                "GetTerminationState",
+            ],
+        )
+        polls = [args for name, args in calls if name == "PollWorker"]
+        self.assertEqual(polls[0], polls[1])
+        self.assertEqual(
+            polls[0]["ApiEndpoint"], "https://vm.lambda-microvm.us-east-1.on.aws/status"
+        )
+        self.assertEqual(
+            polls[0]["Headers"],
+            {
+                "X-aws-proxy-auth": "secret-jwe",
+                "X-aws-proxy-port": "8080",
+            },
+        )
+        token = next(args for name, args in calls if name == "GetWorkerToken")
+        self.assertEqual(
+            token,
+            {
+                "MicrovmIdentifier": "microvm-test",
+                "ExpirationInMinutes": 30,
+                "AllowedPorts": [{"Port": 8080}],
+            },
+        )
+        launch = calls[0][1]
         self.assertEqual(launch["ClientToken"], "same-execution")
         self.assertEqual(launch["MaximumDurationInSeconds"], 1800)
         self.assertEqual(
-            json.loads(launch["RunHookPayload"])["repository"],
-            "TeroTS/factory-smoke-test",
+            launch["IdlePolicy"],
+            {
+                "MaxIdleDurationSeconds": 3600,
+                "SuspendedDurationSeconds": 0,
+                "AutoResumeEnabled": False,
+            },
         )
-        self.assertEqual(self.definition["TimeoutSeconds"], 1680)
-        self.assertEqual(self.definition["States"]["Poll"]["TimeoutSeconds"], 10)
-        self.assertEqual(self.definition["States"]["PendingWait"]["Seconds"], 30)
+        self.assertEqual(
+            json.loads(launch["RunHookPayload"])["repository"],
+            "example/authorized-project",
+        )
+        for name, args in calls:
+            if name not in ("LaunchVM", "PollWorker"):
+                self.assertEqual(args["MicrovmIdentifier"], "microvm-test")
 
-    # Routes malformed status, worker errors, and failed HTTP requests through cleanup,
-    # preventing HTTP 200 alone from becoming success or exposing the auth token.
+    def assert_failed_with_cleanup(self, replies):
+        kind, output, calls, final = simulate(self.definition, replies)
+        self.assertEqual((kind, final), ("Fail", "JobFailed"))
+        self.assertEqual(output["microvmId"], "microvm-test")
+        self.assertEqual(output["status"], "error")
+        self.assertEqual(output["termination"], "TERMINATED")
+        self.assertEqual(output["error"], "JobFailed")
+        self.assertIn("TerminateVM", [name for name, _ in calls])
+        self.assertIn("GetTerminationState", [name for name, _ in calls])
+        self.assertNotIn("secret-jwe", json.dumps(output))
+
     def test_bad_status_and_http_errors_share_cleanup(self):
         for body in (
             {},
@@ -197,74 +317,117 @@ class WorkflowTests(unittest.TestCase):
             {"status": "ok", "extra": True},
             None,
             "not-json",
+            [],
+            200,
         ):
             with self.subTest(body=body):
-                replies = {
-                    **self.replies,
-                    "Poll": [{"StatusCode": 200, "ResponseBody": body}],
-                }
-                kind, output, calls, _ = simulate(self.definition, replies)
-                self.assertEqual(kind, "Fail")
-                self.assertIn("Terminate", [name for name, _ in calls])
+                self.assert_failed_with_cleanup(
+                    {
+                        **self.replies,
+                        "PollWorker": [{"StatusCode": 200, "ResponseBody": body}],
+                    }
+                )
+        for reply in (
+            TaskError(),
+            {},
+            {"StatusCode": 502},
+            {"StatusCode": 200},
+            {"StatusCode": "200", "ResponseBody": {"status": "ok"}},
+        ):
+            with self.subTest(reply=reply):
+                self.assert_failed_with_cleanup({**self.replies, "PollWorker": [reply]})
+
+    def test_launch_failures_do_not_cleanup_unknown_vm(self):
+        for reply in (
+            TaskError(),
+            {},
+            {"MicrovmId": ""},
+            {"MicrovmId": None},
+            {"MicrovmId": 123},
+            {"Endpoint": "vm.invalid"},
+        ):
+            with self.subTest(reply=reply):
+                kind, output, calls, final = simulate(
+                    self.definition,
+                    {**self.replies, "LaunchVM": [reply]},
+                )
+                self.assertEqual((kind, final), ("Fail", "JobFailed"))
+                self.assertNotIn("TerminateVM", [name for name, _ in calls])
+                self.assertNotIn("termination", output)
+                self.assertNotIn("microvmId", output)
                 self.assertNotIn("secret-jwe", json.dumps(output))
-        for reply in (TaskError(), {"StatusCode": 502}, {"StatusCode": 200}):
-            kind, _, calls, _ = simulate(
-                self.definition, {**self.replies, "Poll": [reply]}
-            )
-            self.assertEqual(kind, "Fail")
-            self.assertIn("Confirm", [name for name, _ in calls])
 
-    # Fails unusable image or launch responses without issuing termination when
-    # no VM ID is known, avoiding cleanup against an unidentified resource.
-    def test_prelaunch_failures_do_not_cleanup_unknown_vm(self):
-        for state, reply in (
-            ("Launch", TaskError()),
-            ("Launch", {}),
-            ("InspectVersion", {"State": "FAILED", "Status": "INACTIVE"}),
-        ):
-            kind, _, calls, _ = simulate(
-                self.definition, {**self.replies, state: [reply]}
-            )
-            self.assertEqual(kind, "Fail")
-            self.assertNotIn("Terminate", [name for name, _ in calls])
-
-    # Cleans up a known VM when its endpoint, readiness, or authentication fails,
-    # ensuring catchable post-launch failures cannot bypass termination or succeed.
     def test_postlaunch_failures_never_succeed(self):
-        for state, reply in (
-            ("Launch", {"MicrovmId": "microvm-test"}),
-            ("Readiness", {"State": "TERMINATED"}),
-            ("Readiness", TaskError()),
-            ("Token", TaskError()),
-            ("Token", {}),
+        for state, replies in (
+            ("LaunchVM", [{"MicrovmId": "microvm-test"}]),
+            ("LaunchVM", [{"MicrovmId": "microvm-test", "Endpoint": ""}]),
+            ("LaunchVM", [{"MicrovmId": "microvm-test", "Endpoint": 123}]),
+            ("GetVMState", [{"State": "TERMINATED"}]),
+            ("GetVMState", [{"State": "TERMINATING"}]),
+            ("GetVMState", [{}]),
+            ("GetVMState", [TaskError()]),
+            ("GetVMState", [{"State": "PENDING"}, TaskError()]),
+            ("GetWorkerToken", [TaskError()]),
+            ("GetWorkerToken", [{}]),
+            ("GetWorkerToken", [{"AuthToken": {"X-aws-proxy-auth": ""}}]),
+            ("GetWorkerToken", [{"AuthToken": {"X-aws-proxy-auth": 123}}]),
         ):
-            kind, _, calls, _ = simulate(
-                self.definition, {**self.replies, state: [reply]}
-            )
-            self.assertEqual(kind, "Fail")
-            self.assertIn("Terminate", [name for name, _ in calls])
+            with self.subTest(state=state, replies=replies):
+                self.assert_failed_with_cleanup({**self.replies, state: replies})
 
-    # Reports cleanup failure if termination or confirmation errors, preserving
-    # the distinction between requesting cleanup and proving the VM has stopped.
     def test_cleanup_failure_does_not_claim_termination(self):
-        for state in ("Terminate", "Confirm"):
-            kind, output, _, final = simulate(
-                self.definition, {**self.replies, state: [TaskError()]}
-            )
-            self.assertEqual(kind, "Fail")
-            self.assertEqual(final, "CleanupFailed")
-            self.assertNotIn("termination", output)
+        for state, replies in (
+            ("TerminateVM", [TaskError()]),
+            ("GetTerminationState", [TaskError()]),
+            ("GetTerminationState", [{"State": "TERMINATING"}, TaskError()]),
+            ("GetTerminationState", [{}]),
+            ("GetTerminationState", [{"State": "RUNNING"}]),
+            ("GetTerminationState", [{"State": "PENDING"}]),
+        ):
+            with self.subTest(state=state, replies=replies):
+                kind, output, _, final = simulate(
+                    self.definition,
+                    {**self.replies, state: replies},
+                )
+                self.assertEqual((kind, final), ("Fail", "JobFailed"))
+                self.assertEqual(output["microvmId"], "microvm-test")
+                self.assertEqual(output["error"], "CleanupUnconfirmed")
+                self.assertIn("unconfirmed", output["cause"])
+                self.assertNotIn("termination", output)
+                self.assertNotIn("secret-jwe", json.dumps(output))
 
-    # Models persistent pending responses reaching the overall timeout without Catch
-    # cleanup, preserving the documented need for lifespan/manual recovery fallback.
+    def test_invalid_job_is_forwarded_to_worker_without_changing_contract(self):
+        job = {"repository": "unauthorized/project", "baseSha": "bad", "task": ""}
+        kind, output, calls, _ = simulate(
+            self.definition,
+            {
+                **self.replies,
+                "PollWorker": [
+                    {"StatusCode": 200, "ResponseBody": {"status": "error"}}
+                ],
+            },
+            job=job,
+        )
+        self.assertEqual(kind, "Fail")
+        self.assertEqual(json.loads(calls[0][1]["RunHookPayload"]), job)
+        self.assertEqual(output["termination"], "TERMINATED")
+
     def test_pending_timeout_does_not_run_catch_cleanup(self):
-        replies = {
-            **self.replies,
-            "Poll": [{"StatusCode": 200, "ResponseBody": {"status": "pending"}}] * 60,
-        }
-        kind, _, calls, _ = simulate(self.definition, replies, limit=500)
-        self.assertEqual(kind, "TIMED_OUT")
-        self.assertNotIn("Terminate", [name for name, _ in calls])
+        for state, reply in (
+            ("GetVMState", {"State": "PENDING"}),
+            ("PollWorker", {"StatusCode": 200, "ResponseBody": {"status": "pending"}}),
+            ("GetTerminationState", {"State": "TERMINATING"}),
+        ):
+            with self.subTest(state=state):
+                kind, output, calls, _ = simulate(
+                    self.definition,
+                    {**self.replies, state: [reply] * 340},
+                    limit=1500,
+                )
+                self.assertEqual(kind, "TIMED_OUT")
+                if state != "GetTerminationState":
+                    self.assertNotIn("TerminateVM", [name for name, _ in calls])
+                self.assertNotIn("termination", output)
 
 
 if __name__ == "__main__":

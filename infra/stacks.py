@@ -6,6 +6,7 @@ from aws_cdk import (
     CfnOutput,
     CfnParameter,
     CliCredentialsStackSynthesizer,
+    Duration,
     RemovalPolicy,
     Stack,
 )
@@ -268,19 +269,6 @@ class Workflow(Stack):
         )
         role.add_to_policy(
             iam.PolicyStatement(
-                actions=[
-                    "lambda:RunMicrovm",
-                    "lambda:GetMicrovm",
-                    "lambda:TerminateMicrovm",
-                    "lambda:CreateMicrovmAuthToken",
-                    "lambda:GetMicrovmImage",
-                    "lambda:GetMicrovmImageVersion",
-                ],
-                resources=[image.image.attr_image_arn],
-            )
-        )
-        role.add_to_policy(
-            iam.PolicyStatement(
                 actions=["lambda:PassNetworkConnector"],
                 resources=[
                     CONNECTOR + name for name in ("ALL_INGRESS", "INTERNET_EGRESS")
@@ -325,14 +313,17 @@ class Workflow(Stack):
                 resources=[connection.attr_secret_arn],
             )
         )
-        machine = sfn.CfnStateMachine(
+        machine = sfn.StateMachine(
             self,
             "Workflow",
             state_machine_name="software-factory-poc",
-            state_machine_type="STANDARD",
-            role_arn=role.role_arn,
-            definition_string=self.to_json_string(
+            state_machine_type=sfn.StateMachineType.STANDARD,
+            role=role,
+            timeout=Duration.minutes(28),
+            comment="One VM/Codex invocation; timeout/StopExecution rely on VM lifespan and manual recovery.",
+            definition_body=sfn.DefinitionBody.from_chainable(
                 definition(
+                    self,
                     image.image.attr_image_arn,
                     version.value_as_string,
                     image.runtime.role_arn,
@@ -341,8 +332,9 @@ class Workflow(Stack):
                 )
             ),
         )
-        machine.node.add_dependency(role)
-        CfnOutput(self, "StateMachineArn", value=machine.ref)
+        # Preserve the deployed logical ID so this construct refactor does not replace the workflow.
+        machine.node.default_child.override_logical_id("Workflow")
+        CfnOutput(self, "StateMachineArn", value=machine.state_machine_arn)
         CfnOutput(self, "PinnedImageVersion", value=version.value_as_string)
         CfnOutput(self, "ExecutionRoleArn", value=role.role_arn)
         CfnOutput(self, "ConnectionArn", value=connection.attr_arn)

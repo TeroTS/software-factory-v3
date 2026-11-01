@@ -3,67 +3,61 @@
 Status: done
 
 ## Slice Goal
-- Make a mechanically verified task PR available for human review without obsolete calculator-specific acceptance gates.
+- Run a Job through a simpler CDK lifecycle workflow with fresh observations and shared confirmed termination.
 
 ## Slice Boundary
-- Human reviewer inspects the published diff and tests; automated completion relies on independent final repository verification and matching Git/PR publication, while correctness and test adequacy remain human judgments rather than automatic merge approval.
+- Operator starts one Standard execution using a validated pinned image; fresh worker/lifecycle observations move execution to Succeed only after worker ok and confirmed TERMINATED, or Fail with a retained recovery ID and explicit unconfirmed-cleanup reason.
 
 ## Stories In Scope
-- `US-12 Review a task PR without calculator-specific acceptance gates`
+- `US-13 Run a job through a simplified CDK lifecycle workflow`
 
 ## Stories Completed In This Slice
-- `US-12 Review a task PR without calculator-specific acceptance gates`
+- `US-13 Run a job through a simplified CDK lifecycle workflow`
 
 ## Stories Remaining In This Slice
 - None.
 
 ## Contract Inputs
-- [openapi.yaml](../../openapi.yaml): unchanged Job/lifecycle/status shapes and reduced automated completion guarantees.
-- [docs/contracts.md](../contracts.md): script execution, generic Git/PR consistency, and manual-review boundary.
+- [openapi.yaml](../../openapi.yaml): unchanged Job, lifecycle, authentication, and exact status responses.
+- [docs/contracts.md](../contracts.md): AWS StartExecution idempotency, dynamic launch ID/endpoint, and repository-script completion boundary.
 
 ## Decision Inputs
-- [DECISIONS.md](../../DECISIONS.md): approved removal of AST/chronology/calculator checks and preservation of generic PR checks. US-11 already disconnected obsolete checks and adopted `./scripts/verify`; this slice removes their modules and packaging, not new product policy.
+- [DECISIONS.md](../../DECISIONS.md): high-level CDK preference, deployment-owned pin validation, shared termination, scoped permissions, token-safe output, 28/30-minute bounds, and 5/10-second polling.
+- [todo item 8](../plans/todo.md#8-simplify-the-vm-lifecycle-state-plan): explicit state sequence and allowed ASL bookkeeping.
 
 ## Shared State Required Now
-- Existing authorized Job, scoped credentials, checkout, unique task branch, committed/remote head, configured PR target, and stable terminal status.
-- US-11 is complete locally; prior implementation and gate evidence remain in git history. Deployed resources, secret permissions, active image pin, and unmerged PRs are unchanged.
+- Deployment-controlled image/version, runtime role, connection, connectors and logs; structured Job, dynamic VM ID/endpoint, one port-scoped token, fresh responses, recorded outcome, and confirmed termination.
+- US-12 is complete locally; previous evidence remains in git history. Deployed resources, active image pin, secrets, permissions, and PRs are unchanged.
 
 ## Operations / Endpoints / Surfaces In This Slice
-- `worker/task.py`: own generic `verify_pr()` without changing its checks.
-- Remove `worker/evidence.py`, `image/acceptance.py`, their dedicated tests, and image/source-staging references in `image/Dockerfile`, `.dockerignore`, and `infra/stacks.py`.
-- Retain generic worker/security/script/Git/PR coverage in `tests/test_worker.py`; update image and staging regression tests.
-- Contract descriptions already disclose reduced guarantees; review them for any remaining obsolete requirements.
+- `infra/workflow.py`: high-level connected states, supported SDK integrations, bounded dynamic HTTP polling, and shared cleanup.
+- `infra/stacks.py`: high-level Standard StateMachine and scoped integration permissions.
+- `tests/test_workflow.py`, `tests/test_infra.py`: synthesized ASL and simulated fresh transitions/failure paths.
 
 ## Tests Required
-- Focused PR checks for configured target, branch/head/base, open/unmerged state, positive PR number, and exactly one result.
-- Real local checkout and script verification with one simulated agent changing existing content, committing/pushing through local Git, and providing a matching simulated PR without source-preservation or publication chronology gates.
-- Retain credential/redaction, authorization, script failure, clean commits, remote/PR mismatch, lifecycle/status, and real sandbox/configuration coverage.
-- Focused tests, `make verify`, `make preflight`, `make synth`, whitespace and affected local links/formatting; investigate coverage changes without narrowing measurement scope.
+- Test-first state-plan, fresh startup/status/termination polling, token reuse, invalid launch/token/status responses, API/HTTP failures, known-ID cleanup, unconfirmed termination, token-free terminal outputs, and persistent-pending timeout checks.
+- Focused workflow/infrastructure tests, `make verify`, `make synth`, whitespace and affected local links/formatting; investigate coverage changes without narrowing scope.
 
 ## Not Now
-- US-13 workflow simplification and US-14 broader suite consolidation.
-- README.md, AGENTS.md, DECISIONS.md, dependency changes, new Job fields, frameworks, agent retries, deployment, live Jobs, image-version activation, or broader repository/credential scope.
-- US-05/US-06 live demonstrations require separate authorization. Existing README/agent guidance references to removed acceptance code remain untouched under the explicit US-08–US-14 documentation boundary.
+- US-14 suite consolidation and separately authorized US-05/US-06 live demonstrations.
+- Deployment, live Jobs, image build/activation, new credentials/repository scope, dependencies, compute, Job fields, README.md, AGENTS.md, or DECISIONS.md changes.
 
 ## Done When
-- Obsolete evidence/calculator modules, dedicated tests, and runtime/build references are gone without relocation.
-- Independent final `./scripts/verify`, nonempty clean commits, baseline ancestry, matching remote head and exactly one open unmerged configured-target PR still gate success.
-- Contracts and this note disclose that automated success does not prove task correctness, adequate/unweakened tests, or verification-before-publication.
-- Required local checks pass and actual results, coverage changes, and live-verification gaps are recorded here.
+- Per-execution image inspections are removed and supported high-level states/integrations implement the approved fresh-polling/shared-termination plan.
+- Success requires worker ok and fresh confirmed TERMINATED; catchable known-ID failures share termination, cleanup failures retain the ID and explicitly report unconfirmed cleanup, and terminal outputs exclude tokens.
+- Scoped permissions, launch idempotency, request limits, normal VM/idle bounds, and overall timeout remain intact; required local checks and live-verification gaps are recorded here.
 
 ## Completion Summary
-- US-12 is complete locally. Deleted `worker/evidence.py` and `image/acceptance.py`, all six dedicated chronology/AST/calculator tests, and unused calculator fixtures/imports/constants. The disconnected `TEST_COMMAND` disappeared with its module; the active worker already uses `./scripts/verify`. No obsolete checks were relocated or restored.
-- `verify_pr()` now lives in `worker/task.py` with its existing validation and failure messages unchanged. Generic PR regressions now target `release` and cover branch/head/base mismatches, closed/merged PRs, invalid/missing numbers, and missing/duplicate results. All existing generic worker, credential, script, authorization, lifecycle, and workflow tests remain.
-- Removed acceptance packaging from `image/Dockerfile` and `.dockerignore`, and both obsolete modules from native CDK source staging. Staging rebuilds only its generated `factory-source` directory so previous synthesis cannot silently repackage removed files. The staging test plants stale content and requires exactly the current Dockerfile, runtime requirements, managed configuration, server, and task files.
-- The existing generic `example/authorized-project` job regression passed with real local checkout/scripts/Git, a simulated agent replacing existing greeting content, and matching simulated PR publication to `release`. Only the initial sandbox probe is supplied as command evidence; no source-preservation or verification-before-publication chronology gates apply. One agent invocation and independent final verification remain mandatory. STS/Secrets Manager use Stubber; model and GitHub services are simulated.
-- Reviewed `openapi.yaml` and `docs/contracts.md`; their existing US-11 descriptions already specify independent script/Git/PR completion and explicitly exclude automated correctness, test adequacy, AST preservation, and publication chronology, so no contract edit was necessary. Passing scripts do not protect against weakened tests. Human GitHub review remains required and does not establish command chronology or authorize merging. README.md, AGENTS.md, and DECISIONS.md remain unchanged per the story documentation boundary.
-- Test-first checks failed for the intended missing changes: PR validation still belonged to `worker.evidence`, obsolete acceptance still existed, and repeated staging retained obsolete/stale files. After implementation, focused `uv run --locked python -m unittest discover -s tests -p test_worker.py -v` (24), `-p test_image_runtime.py -v` (four), and `-p test_infra.py -v` (seven) passed. An initial formatting check identified two affected test files; only those were formatted with `uv run --locked ruff format tests/test_worker.py tests/test_infra.py`.
-- `make verify` passed formatting, lint, coverage/tests, and logging: 55 discovered, 52 passed, three Docker-only host skips. Six obsolete tests were removed and two packaging/ownership regressions added, explaining the net decrease from 59 tests. Overall coverage increased from the US-11 recorded 94% to 95%; `worker/task.py` increased from 94% to 95% with PR validation moved into its measurement. `infra/stacks.py` remains 100%, including both fresh and repeat staging. The configured source scope remains `tools`, `worker`, `infra`, and `image`, with branch and missing-line reporting unchanged; `image` now has no Python production module to report. No coverage gate was lowered or measurement scope narrowed.
-- `make preflight` passed image validation plus all 34 Linux ARM64 tests on Python 3.13: three real runtime/config/sandbox checks, 24 worker/publication checks, and seven lifecycle checks. Containers had no host credentials or external networking and metadata access was disabled; only Docker's outer seccomp filter was disabled for nested namespaces, not Codex's sandbox. An additional credential-free Docker assertion confirmed both deleted modules are absent from the built image. Local image `sha256:b278cbeb73121e44db3df5b47bee2a218d0fa3907e03cffbe805235d650d86f5` is not an active AWS image pin.
-- `make synth` passed without AWS lookups/deployment, regenerating the current source asset without obsolete files. Existing Node 25.4.0/jsii compatibility and CDK feature-flag notices remain; Node 22/24 is recommended. No dependencies, runtime credentials, image activation, permissions, or deployed resources were changed.
-- `git diff --check` and current-slice local-link/heading/fence checks passed. Runtime/build searches found no obsolete helper/module references except explicit regression assertions of absence. No dedicated OpenAPI semantic validator, type-check, or CI command is configured; unchanged contracts did not require new schema validation.
-- No live Job, AWS deployment, model call, external GitHub publication/review, or actual MicroVM credential-provider/refresh proof was attempted. Live use requires separate authorization, a newly validated pinned image, reviewed repository/token scope and script credential exposure, approved executable scripts/baseline, retained VM ID, and confirmed cleanup. Local simulated success does not establish the real gates.
+- US-13 is complete locally. `infra/workflow.py` now connects high-level Pass, Choice, Wait, Succeed and Fail constructs; `infra/stacks.py` owns a high-level Standard StateMachine with the existing 28-minute timeout. The synthesized definition has 27 states, no per-execution image/version inspection, and one launch using the execution name as client token. Deployment still requires an explicit image-version parameter without a default; image validation and new-source/version checks remain deployment responsibilities.
+- Verified pinned CDK 2.275.0 constructor APIs and a credential-free `CallAwsService` probe; the five MicroVM SDK tasks synthesize the existing `lambdamicrovms` integration resources using explicit `lambda:` IAM actions scoped to the image ARN. Reviewed pinned CDK HTTP implementation and CDK documentation through the IaC MCP search. `HttpInvoke` generates wildcard state-machine resource permission without the existing GET condition and couples its static `apiRoot` to the request URL; only `PollWorker` uses CustomState to retain dynamic launch-derived HTTPS endpoints and the existing narrow HTTP/connection/secret grants. No dependencies, compute, custom providers, or extra permissions were added; obsolete image-inspection permissions were removed from the synthesized execution policy.
+- Startup and termination wait five seconds before fresh lifecycle calls; only PENDING/TERMINATING respectively repeat. Pending worker status waits ten seconds then calls HTTP again, never rereading stale response data or checking lifecycle on each worker poll. One nonempty port-8080 token is requested with 30-minute expiration and reused. HTTP requests retain their ten-second timeout and exact status-body checks. Worker ok and all catchable known-ID failures record outcomes and share one termination sequence. Missing ID fails directly; missing endpoint/token, malformed status, worker error, and API/HTTP failures cannot succeed.
+- Confirmed termination shapes the existing successful output (`microvmId`, `status`, `termination`) before JobSucceeded. JobFailed now receives sanitized bookkeeping output with explicit JobFailed or CleanupUnconfirmed error/cause; known IDs survive, unconfirmed cleanup never claims TERMINATED, and both failed and successful terminal state inputs exclude the token and raw service causes. Earlier execution history still contains the JWE and must remain access-restricted. Normal VM lifespan/idle configuration is unchanged. Workflow timeout/cancellation still bypasses Catch cleanup; lifespan/manual recovery remain mandatory.
+- Preserved CloudFormation logical ID `Workflow` when switching to StateMachine, preventing this construct refactor from proposing workflow replacement solely due to a generated ID. CDK automatically retains role/policy dependencies. Initial regression checks failed on the old image inspections, CfnStateMachine, missing sanitized recovery output, absent recorded failure reason, and changed logical ID; the final implementation passes those checks.
+- Focused `uv run --locked python -m unittest discover -s tests -p test_workflow.py -v` (nine) and `-p test_infra.py -v` (eight) passed. Workflow tests execute the actual stack-synthesized ASL with simulated service responses from launch through fresh readiness/status/termination observations, checking one launch/token, reused headers, strict invalid-response handling, catch routing, retained IDs, token-free terminal state, and persistent startup/worker/termination waits reaching overall timeout. These are local transition simulations, not a real Step Functions interpreter, MicroVM, or end-to-end live Job; malformed Job validation remains worker-owned and is covered by the retained worker/server tests.
+- Final `make verify` passed formatting, lint, coverage/tests and logging: 58 discovered, 55 passed, three Docker-only host skips. Three tests were added relative to US-12; no focused worker/security/lifecycle tests were removed. Overall coverage remains 95%; `infra/workflow.py` and `infra/stacks.py` are 100%, and worker/tool coverage is unchanged. Coverage source scope and branch/missing-line reporting were not narrowed. CDK construct execution coverage is not proof of remote state-transition coverage. Early formatting/import checks were corrected only in affected files using targeted formatting/import edits.
+- `make synth` passed without AWS lookups or deployment; generated ASL and role/policy dependencies were inspected. Existing Node 25.4.0/jsii compatibility and CDK feature-flag notices remain; Node 22/24 is recommended. `git diff --check` and current-slice local-link/heading/fence checks passed. The unchanged HTTP and submission contracts were reviewed; this story does not change their request/response schemas.
+- `make preflight` was not rerun because no worker, image, managed configuration, runtime dependencies, source staging, or sandbox behavior changed; run `make preflight` before any newly authorized image deployment. No dedicated semantic ASL validator, type-check, or CI command is configured, and no AWS validation API was called. No deployment, live Job, model/GitHub call, image activation, credentials, secret scopes, or existing resources/PRs were changed. Local synthesis does not establish live integration support, authentication, scoped role/model access, or real termination. Deployment/live checks require separate authorization, reviewed permissions, a newly validated explicit image pin, retained VM ID, restricted history access, and confirmed cleanup.
 
 ## Next Slice Recommendation
-- `US-13 Run a job through a simplified CDK lifecycle workflow`: replace per-execution image inspection and raw orchestration with the approved high-level/fresh-polling/shared-termination state plan, retaining scoped permissions and token-safe results.
-- Keep US-14 test consolidation in view, but defer it and separately authorized US-05/US-06 demonstrations.
+- `US-14 Verify generic job outcomes with focused and end-to-end tests`: consolidate duplicates without removing security/lifecycle coverage, and cover successful publication, script failure, and publication failure through confirmed termination.
+- Defer separately authorized US-05/US-06 live demonstrations until the follow-ups are complete; local simulations do not replace either gate.

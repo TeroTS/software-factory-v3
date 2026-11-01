@@ -1,140 +1,144 @@
-# Build the Standard ASL lifecycle workflow; input is Job, output excludes auth tokens.
-SDK = "arn:aws:states:::aws-sdk:lambdamicrovms:"
+# Connect one Standard Job lifecycle using deployment pins; terminal results exclude tokens.
+from aws_cdk import Duration
+from aws_cdk import aws_stepfunctions as sfn
+from aws_cdk import aws_stepfunctions_tasks as tasks
+
 CONNECTOR = "arn:aws:lambda:us-east-1:aws:network-connector:aws-network-connector:"
 
 
-# Define a caught API task, retaining prior state and routing failures without reruns.
-def task(operation, parameters, result, next_state, failure="JobFailed"):
-    return {
-        "Type": "Task",
-        "Resource": SDK + operation,
-        "Parameters": parameters,
-        "ResultPath": result,
-        "Next": next_state,
-        "Catch": [
-            {"ErrorEquals": ["States.ALL"], "ResultPath": "$.failure", "Next": failure}
-        ],
-    }
+# Build a supported SDK task, preserving prior state and granting only the pinned image scope.
+def task(scope, name, operation, parameters, result, image_arn):
+    return tasks.CallAwsService(
+        scope,
+        name,
+        service="lambdamicrovms",
+        action=operation,
+        iam_action="lambda:" + operation[0].upper() + operation[1:],
+        iam_resources=[image_arn],
+        parameters=parameters,
+        result_path=result,
+    )
 
 
-# Guard JSONPath existence/type before accessing a string in choices or tasks.
+# Guard absent/nonstring values before string comparisons in lifecycle/status decisions.
 def string(path, value=None):
-    conditions = [
-        {"Variable": path, "IsPresent": True},
-        {"Variable": path, "IsString": True},
-    ]
-    if value is not None:
-        conditions.append({"Variable": path, "StringEquals": value})
-    else:
-        conditions.append({"Not": {"Variable": path, "StringEquals": ""}})
-    return {"And": conditions}
+    return sfn.Condition.and_(
+        sfn.Condition.is_present(path),
+        sfn.Condition.is_string(path),
+        sfn.Condition.string_equals(path, value)
+        if value is not None
+        else sfn.Condition.not_(sfn.Condition.string_equals(path, "")),
+    )
 
 
-# Define one pinned-image launch, one JWE, strict status polling and confirmed cleanup.
-def definition(image_arn, image_version, runtime_role, connection_arn, log_group):
-    states = {
-        "Input": {"Type": "Pass", "Parameters": {"job.$": "$"}, "Next": "InspectImage"},
-        "InspectImage": task(
-            "getMicrovmImage", {"ImageIdentifier": image_arn}, "$.image", "ImageReady"
-        ),
-        "ImageReady": {
-            "Type": "Choice",
-            "Choices": [
-                {
-                    "Or": [
-                        string("$.image.State", "CREATED"),
-                        string("$.image.State", "UPDATED"),
-                    ],
-                    "Next": "InspectVersion",
-                }
-            ],
-            "Default": "JobFailed",
+# Return a connected launch/poll/shared-termination chain; the stack owns timeout and permissions.
+def definition(
+    scope, image_arn, image_version, runtime_role, connection_arn, log_group
+):
+    start = sfn.Pass(scope, "Input", parameters={"job.$": "$"})
+    failed = sfn.Fail(scope, "JobFailed", error_path="$.error", cause_path="$.cause")
+    succeeded = sfn.Succeed(scope, "JobSucceeded")
+    no_vm = sfn.Pass(
+        scope,
+        "RecordLaunchFailure",
+        parameters={
+            "status": "error",
+            "error": "JobFailed",
+            "cause": "Launch failed without a known VM ID; uncertain launches remain lifespan-bounded. Inspect execution history and recover manually.",
         },
-        "InspectVersion": task(
-            "getMicrovmImageVersion",
-            {"ImageIdentifier": image_arn, "ImageVersion": image_version},
-            "$.version",
-            "VersionReady",
-        ),
-        "VersionReady": {
-            "Type": "Choice",
-            "Choices": [
-                {
-                    "And": [
-                        string("$.version.State", "SUCCESSFUL"),
-                        string("$.version.Status", "ACTIVE"),
-                    ],
-                    "Next": "Launch",
-                }
-            ],
-            "Default": "JobFailed",
+    ).next(failed)
+    cleanup_failed = sfn.Pass(
+        scope,
+        "RecordCleanupFailure",
+        parameters={
+            "microvmId.$": "$.vm.MicrovmId",
+            "status": "error",
+            "error": "CleanupUnconfirmed",
+            "cause": "Termination is unconfirmed; recover the retained VM ID manually. VM lifespan remains the fallback.",
         },
-        "Launch": task(
-            "runMicrovm",
-            {
-                "ImageIdentifier": image_arn,
-                "ImageVersion": image_version,
-                "ExecutionRoleArn": runtime_role,
-                "ClientToken.$": "$$.Execution.Name",
-                "RunHookPayload.$": "States.JsonToString($.job)",
-                "IngressNetworkConnectors": [CONNECTOR + "ALL_INGRESS"],
-                "EgressNetworkConnectors": [CONNECTOR + "INTERNET_EGRESS"],
-                "Logging": {"CloudWatch": {"LogGroup": log_group}},
-                "MaximumDurationInSeconds": 1800,
-                "IdlePolicy": {
-                    "MaxIdleDurationSeconds": 3600,
-                    "SuspendedDurationSeconds": 0,
-                    "AutoResumeEnabled": False,
-                },
+    ).next(failed)
+    job_failed = sfn.Pass(
+        scope,
+        "RecordJobFailure",
+        parameters={
+            "microvmId.$": "$.microvmId",
+            "status.$": "$.status",
+            "termination.$": "$.termination",
+            "error": "JobFailed",
+            "cause": "Task failed; inspect CloudWatch and the retained VM ID.",
+        },
+    ).next(failed)
+    success = sfn.Pass(
+        scope,
+        "RecordSuccess",
+        result=sfn.Result.from_object({"status": "ok"}),
+        result_path="$.outcome",
+    )
+    failure = sfn.Pass(
+        scope,
+        "RecordFailure",
+        parameters={
+            "status": "error",
+            "reason": "Worker or post-launch service failure; inspect CloudWatch and execution history.",
+        },
+        result_path="$.outcome",
+    )
+    launch = task(
+        scope,
+        "LaunchVM",
+        "runMicrovm",
+        {
+            "ImageIdentifier": image_arn,
+            "ImageVersion": image_version,
+            "ExecutionRoleArn": runtime_role,
+            "ClientToken.$": "$$.Execution.Name",
+            "RunHookPayload.$": "States.JsonToString($.job)",
+            "IngressNetworkConnectors": [CONNECTOR + "ALL_INGRESS"],
+            "EgressNetworkConnectors": [CONNECTOR + "INTERNET_EGRESS"],
+            "Logging": {"CloudWatch": {"LogGroup": log_group}},
+            "MaximumDurationInSeconds": 1800,
+            "IdlePolicy": {
+                "MaxIdleDurationSeconds": 3600,
+                "SuspendedDurationSeconds": 0,
+                "AutoResumeEnabled": False,
             },
-            "$.vm",
-            "KnownVM",
-        ),
-        "KnownVM": {
-            "Type": "Choice",
-            "Choices": [{**string("$.vm.MicrovmId"), "Next": "Endpoint"}],
-            "Default": "JobFailed",
         },
-        "Endpoint": {
-            "Type": "Choice",
-            "Choices": [{**string("$.vm.Endpoint"), "Next": "ReadyWait"}],
-            "Default": "Error",
+        "$.vm",
+        image_arn,
+    )
+    check_launch = sfn.Choice(scope, "CheckLaunch")
+    check_endpoint = sfn.Choice(scope, "CheckEndpoint")
+    startup_wait = sfn.Wait(
+        scope, "WaitForVMToStart", time=sfn.WaitTime.duration(Duration.seconds(5))
+    )
+    get_vm = task(
+        scope,
+        "GetVMState",
+        "getMicrovm",
+        {"MicrovmIdentifier.$": "$.vm.MicrovmId"},
+        "$.lifecycle",
+        image_arn,
+    )
+    running = sfn.Choice(scope, "IsVMRunning")
+    token = task(
+        scope,
+        "GetWorkerToken",
+        "createMicrovmAuthToken",
+        {
+            "MicrovmIdentifier.$": "$.vm.MicrovmId",
+            "ExpirationInMinutes": 30,
+            "AllowedPorts": [{"Port": 8080}],
         },
-        "ReadyWait": {"Type": "Wait", "Seconds": 5, "Next": "Readiness"},
-        "Readiness": task(
-            "getMicrovm",
-            {"MicrovmIdentifier.$": "$.vm.MicrovmId"},
-            "$.lifecycle",
-            "Running",
-            "Error",
-        ),
-        "Running": {
-            "Type": "Choice",
-            "Choices": [
-                {**string("$.lifecycle.State", "RUNNING"), "Next": "Token"},
-                {**string("$.lifecycle.State", "PENDING"), "Next": "ReadyWait"},
-            ],
-            "Default": "Error",
-        },
-        "Token": task(
-            "createMicrovmAuthToken",
-            {
-                "MicrovmIdentifier.$": "$.vm.MicrovmId",
-                "ExpirationInMinutes": 30,
-                "AllowedPorts": [{"Port": 8080}],
-            },
-            "$.auth",
-            "TokenPresent",
-            "Error",
-        ),
-        "TokenPresent": {
-            "Type": "Choice",
-            "Choices": [
-                {**string("$.auth.AuthToken['X-aws-proxy-auth']"), "Next": "Poll"}
-            ],
-            "Default": "Error",
-        },
-        "Poll": {
+        "$.auth",
+        image_arn,
+    )
+    check_token = sfn.Choice(scope, "CheckWorkerToken")
+    # HttpInvoke grants wildcard state-machine access and couples apiRoot to the URL;
+    # a raw HTTP task preserves the dynamic host and the stack's narrower GET permissions.
+    poll = sfn.CustomState(
+        scope,
+        "PollWorker",
+        state_json={
             "Type": "Task",
             "Resource": "arn:aws:states:::http:invoke",
             "Parameters": {
@@ -148,119 +152,89 @@ def definition(image_arn, image_version, runtime_role, connection_arn, log_group
             },
             "TimeoutSeconds": 10,
             "ResultPath": "$.response",
-            "Next": "ResponsePresent",
-            "Catch": [
-                {
-                    "ErrorEquals": ["States.ALL"],
-                    "ResultPath": "$.failure",
-                    "Next": "Error",
-                }
-            ],
         },
-        "ResponsePresent": {
-            "Type": "Choice",
-            "Choices": [
-                {
-                    "And": [
-                        {"Variable": "$.response.StatusCode", "IsPresent": True},
-                        {"Variable": "$.response.StatusCode", "NumericEquals": 200},
-                        {"Variable": "$.response.ResponseBody", "IsPresent": True},
-                    ],
-                    "Next": "EncodeStatus",
-                }
-            ],
-            "Default": "Error",
+    )
+    response_present = sfn.Choice(scope, "CheckWorkerResponse")
+    encode_status = sfn.Pass(
+        scope,
+        "EncodeStatus",
+        parameters={"body.$": "States.JsonToString($.response.ResponseBody)"},
+        result_path="$.status",
+    )
+    status = sfn.Choice(scope, "CheckWorkerStatus")
+    worker_wait = sfn.Wait(
+        scope, "WaitForWorker", time=sfn.WaitTime.duration(Duration.seconds(10))
+    )
+    terminate = task(
+        scope,
+        "TerminateVM",
+        "terminateMicrovm",
+        {"MicrovmIdentifier.$": "$.vm.MicrovmId"},
+        "$.terminationRequest",
+        image_arn,
+    )
+    termination_wait = sfn.Wait(
+        scope, "WaitForVMToTerminate", time=sfn.WaitTime.duration(Duration.seconds(5))
+    )
+    get_termination = task(
+        scope,
+        "GetTerminationState",
+        "getMicrovm",
+        {"MicrovmIdentifier.$": "$.vm.MicrovmId"},
+        "$.lifecycle",
+        image_arn,
+    )
+    terminated = sfn.Choice(scope, "IsVMTerminated")
+    result = sfn.Pass(
+        scope,
+        "EndResult",
+        parameters={
+            "microvmId.$": "$.vm.MicrovmId",
+            "status.$": "$.outcome.status",
+            "termination": "TERMINATED",
         },
-        "EncodeStatus": {
-            "Type": "Pass",
-            "Parameters": {"body.$": "States.JsonToString($.response.ResponseBody)"},
-            "ResultPath": "$.status",
-            "Next": "Status",
-        },
-        "Status": {
-            "Type": "Choice",
-            "Choices": [
-                {
-                    "Variable": "$.status.body",
-                    "StringEquals": '{"status":"pending"}',
-                    "Next": "PendingWait",
-                },
-                {
-                    "Variable": "$.status.body",
-                    "StringEquals": '{"status":"ok"}',
-                    "Next": "OK",
-                },
-            ],
-            "Default": "Error",
-        },
-        "PendingWait": {"Type": "Wait", "Seconds": 30, "Next": "Poll"},
-        "OK": {
-            "Type": "Pass",
-            "Result": "ok",
-            "ResultPath": "$.outcome",
-            "Next": "Terminate",
-        },
-        "Error": {
-            "Type": "Pass",
-            "Result": "error",
-            "ResultPath": "$.outcome",
-            "Next": "Terminate",
-        },
-        # CDK drops None values; retain the acknowledgment separately so the VM ID survives.
-        "Terminate": task(
-            "terminateMicrovm",
-            {"MicrovmIdentifier.$": "$.vm.MicrovmId"},
-            "$.terminationRequest",
-            "CleanupWait",
-            "CleanupFailed",
+    )
+    outcome = sfn.Choice(scope, "CheckEndResult")
+
+    launch.add_catch(no_vm, result_path="$.failure")
+    for api in (get_vm, token, poll):
+        api.add_catch(failure, result_path="$.failure")
+    for api in (terminate, get_termination):
+        api.add_catch(cleanup_failed, result_path="$.failure")
+
+    start.next(launch).next(check_launch)
+    check_launch.when(string("$.vm.MicrovmId"), check_endpoint).otherwise(no_vm)
+    check_endpoint.when(string("$.vm.Endpoint"), startup_wait).otherwise(failure)
+    startup_wait.next(get_vm).next(running)
+    running.when(string("$.lifecycle.State", "RUNNING"), token)
+    running.when(string("$.lifecycle.State", "PENDING"), startup_wait).otherwise(
+        failure
+    )
+    token.next(check_token)
+    check_token.when(string("$.auth.AuthToken['X-aws-proxy-auth']"), poll).otherwise(
+        failure
+    )
+    poll.next(response_present)
+    response_present.when(
+        sfn.Condition.and_(
+            sfn.Condition.is_present("$.response.StatusCode"),
+            sfn.Condition.is_numeric("$.response.StatusCode"),
+            sfn.Condition.number_equals("$.response.StatusCode", 200),
+            sfn.Condition.is_present("$.response.ResponseBody"),
         ),
-        "CleanupWait": {"Type": "Wait", "Seconds": 5, "Next": "Confirm"},
-        "Confirm": task(
-            "getMicrovm",
-            {"MicrovmIdentifier.$": "$.vm.MicrovmId"},
-            "$.lifecycle",
-            "Terminated",
-            "CleanupFailed",
-        ),
-        "Terminated": {
-            "Type": "Choice",
-            "Choices": [
-                {**string("$.lifecycle.State", "TERMINATED"), "Next": "PublicResult"},
-                {**string("$.lifecycle.State", "TERMINATING"), "Next": "CleanupWait"},
-            ],
-            "Default": "CleanupFailed",
-        },
-        "PublicResult": {
-            "Type": "Pass",
-            "Parameters": {
-                "microvmId.$": "$.vm.MicrovmId",
-                "status.$": "$.outcome",
-                "termination": "TERMINATED",
-            },
-            "Next": "Outcome",
-        },
-        "Outcome": {
-            "Type": "Choice",
-            "Choices": [
-                {"Variable": "$.status", "StringEquals": "ok", "Next": "Success"}
-            ],
-            "Default": "JobFailed",
-        },
-        "Success": {"Type": "Succeed"},
-        "JobFailed": {
-            "Type": "Fail",
-            "Error": "JobFailed",
-            "Cause": "Task failed; inspect CloudWatch and retained VM ID. Unknown launches remain lifespan-bounded.",
-        },
-        "CleanupFailed": {
-            "Type": "Fail",
-            "Error": "CleanupUnconfirmed",
-            "Cause": "Termination is unconfirmed; recover the retained VM ID manually. VM lifespan remains the fallback.",
-        },
-    }
-    return {
-        "Comment": "One VM/Codex invocation; timeout/StopExecution rely on VM lifespan and manual recovery.",
-        "StartAt": "Input",
-        "TimeoutSeconds": 1680,
-        "States": states,
-    }
+        encode_status,
+    ).otherwise(failure)
+    encode_status.next(status)
+    status.when(string("$.status.body", '{"status":"pending"}'), worker_wait)
+    status.when(string("$.status.body", '{"status":"ok"}'), success).otherwise(failure)
+    worker_wait.next(poll)
+    success.next(terminate)
+    failure.next(terminate)
+    terminate.next(termination_wait).next(get_termination).next(terminated)
+    terminated.when(string("$.lifecycle.State", "TERMINATED"), result)
+    terminated.when(
+        string("$.lifecycle.State", "TERMINATING"), termination_wait
+    ).otherwise(cleanup_failed)
+    result.next(outcome)
+    outcome.when(string("$.status", "ok"), succeeded).otherwise(job_failed)
+    return start
