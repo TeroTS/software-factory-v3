@@ -186,16 +186,14 @@ Stop on unrecoverable failure. Your prose final response or successful process e
 """
 
 
-# Clone/test the pinned baseline, run one agent, then verify tests/Git/remote PR independently.
-def execute(job):
-    job = parse_job({"microvmId": "runtime", "runHookPayload": json.dumps(job)})
+# Prepare the subprocess environment and Git auth; register secrets and reject unscoped credentials.
+def prepare_environment(secrets):
     env = {
         **os.environ,
         "AWS_REGION": "us-east-1",
         "AWS_DEFAULT_REGION": "us-east-1",
         "PYTHONDONTWRITEBYTECODE": "1",
     }
-    secrets = []
     print("Discover scoped runtime credentials", flush=True)
     initial_access = credentials(env, secrets)
     print("Retrieve repository-scoped GitHub token", flush=True)
@@ -212,6 +210,11 @@ def execute(job):
     secrets.append(token)
     env["GH_TOKEN"] = token
     capture(["gh", "auth", "setup-git"], None, env)
+    return env, initial_access
+
+
+# Clone/test the pinned Job baseline; return repository, unique branch, and source/test evidence.
+def prepare_repository(job, env, secrets):
     root = Path(env["WORKSPACE"])
     root.mkdir(parents=True, exist_ok=True)
     repository = root / "repository"
@@ -241,6 +244,11 @@ def execute(job):
         for name in FILES
     }
     logged(TEST_COMMAND.split(), repository, env, secrets)
+    return repository, branch, baseline
+
+
+# Enforce the pinned Codex invocation for this Job/branch; return streamed events or propagate failure.
+def invoke_agent(job, repository, branch, env, secrets):
     version = capture(["codex", "--version"], repository, env).strip()
     if version != "codex-cli 0.166.0":
         raise ValueError("Unexpected pinned Codex version")
@@ -271,7 +279,11 @@ def execute(job):
         str(repository / ".git"),
         "-",
     ]
-    events = run_agent(args, prompt_for(job, branch), repository, env, secrets)
+    return run_agent(args, prompt_for(job, branch), repository, env, secrets)
+
+
+# Independently check agent events, tests, baseline changes, Git and PR; reject incomplete publication.
+def verify_completion(job, repository, branch, baseline, events, env, secrets):
     verify_events(events)
     print("Independently verify approved final tests and changes", flush=True)
     logged(TEST_COMMAND.split(), repository, env, secrets)
@@ -323,6 +335,16 @@ def execute(job):
         )
     )
     verify_pr(prs, branch, head, job["baseSha"])
+
+
+# Validate and coordinate one Job's stages; require final scoped credentials before successful exit.
+def execute(job):
+    job = parse_job({"microvmId": "runtime", "runHookPayload": json.dumps(job)})
+    secrets = []
+    env, initial_access = prepare_environment(secrets)
+    repository, branch, baseline = prepare_repository(job, env, secrets)
+    events = invoke_agent(job, repository, branch, env, secrets)
+    verify_completion(job, repository, branch, baseline, events, env, secrets)
     print("Rediscover scoped runtime credentials after completion", flush=True)
     refreshed_access = credentials(env, secrets)
     print(

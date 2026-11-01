@@ -368,6 +368,38 @@ class WorkerTests(unittest.TestCase):
     # Exercises real local checkout, tests, and Git with simulated external services,
     # checking one agent invocation, one PR, and secret-free passing-test logs.
     def test_real_checkout_tests_git_and_simulated_agent_publication(self):
+        stages = (
+            "prepare_environment",
+            "prepare_repository",
+            "invoke_agent",
+            "verify_completion",
+        )
+        for name in stages:
+            self.assertTrue(hasattr(self.task, name), "Worker stage missing: " + name)
+        calls = []
+        results = {}
+
+        def observe(name, function):
+            def run(*args):
+                calls.append((name, args))
+                result = function(*args)
+                results[name] = result
+                return result
+
+            return run
+
+        with contextlib.ExitStack() as stack:
+            for name in (*stages, "credentials"):
+                stack.enter_context(
+                    patch.object(
+                        self.task,
+                        name,
+                        side_effect=observe(name, getattr(self.task, name)),
+                    )
+                )
+            self.run_staged_job(calls, results)
+
+    def run_staged_job(self, calls, results):
         with (
             patch.dict(os.environ, self.env),
             patch.object(self.task, "capture", side_effect=self.external),
@@ -375,6 +407,36 @@ class WorkerTests(unittest.TestCase):
             contextlib.redirect_stdout(io.StringIO()) as logs,
         ):
             self.task.execute(self.job)
+        self.assertEqual(
+            [name for name, _ in calls],
+            [
+                "prepare_environment",
+                "credentials",
+                "prepare_repository",
+                "invoke_agent",
+                "verify_completion",
+                "credentials",
+            ],
+        )
+        env, initial_access = results["prepare_environment"]
+        repository, branch, baseline = results["prepare_repository"]
+        secrets = calls[0][1][0]
+        self.assertEqual(initial_access, "ASIA" + "X" * 16)
+        self.assertEqual(calls[2][1], (self.job, env, secrets))
+        self.assertEqual(calls[3][1], (self.job, repository, branch, env, secrets))
+        self.assertEqual(
+            calls[4][1],
+            (
+                self.job,
+                repository,
+                branch,
+                baseline,
+                results["invoke_agent"],
+                env,
+                secrets,
+            ),
+        )
+        self.assertEqual(calls[5][1], (env, secrets))
         self.assertEqual(self.agent_calls, 1)
         self.assertEqual(len(self.prs), 1)
         for stubber in self.stubbers.values():
@@ -382,6 +444,47 @@ class WorkerTests(unittest.TestCase):
         self.assertIn("exit code 0", logs.getvalue())
         for secret in ("github_pat_synthetic_token", "secret-access", "session-token"):
             self.assertNotIn(secret, logs.getvalue())
+
+    # Stops at each failed stage or final credential check without leaking its exception.
+    def test_stage_failures_stop_coordination_and_final_success(self):
+        stages = (
+            "prepare_environment",
+            "prepare_repository",
+            "invoke_agent",
+            "verify_completion",
+            "credentials",
+        )
+        for name in stages:
+            self.assertTrue(hasattr(self.task, name), "Worker stage missing: " + name)
+        for failed in stages:
+            calls = []
+
+            def stage(name, calls=calls, failed=failed):
+                def run(*args):
+                    calls.append(name)
+                    if name == failed:
+                        raise ValueError("secret-value")
+                    return {
+                        "prepare_environment": ({}, "initial-access"),
+                        "prepare_repository": (self.root, "branch", {}),
+                        "invoke_agent": [],
+                    }.get(name)
+
+                return run
+
+            with self.subTest(failed=failed), contextlib.ExitStack() as stack:
+                for name in stages:
+                    stack.enter_context(
+                        patch.object(self.task, name, side_effect=stage(name))
+                    )
+                stack.enter_context(
+                    patch("sys.stdin", io.StringIO(json.dumps(self.job)))
+                )
+                logs = stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+                self.assertEqual(self.task.main(), 1)
+                self.assertEqual(calls, list(stages[: stages.index(failed) + 1]))
+                self.assertNotIn("secret-value", logs.getvalue())
+                self.assertNotIn("Verified passing tests", logs.getvalue())
 
     # Fails an unavailable pinned baseline before any agent call or PR, protecting
     # the controlled-failure demonstration from unintended model use or publication.
