@@ -3,10 +3,13 @@ FROM public.ecr.aws/lambda/microvms:al2023-minimal
 # Install pinned CLI packages through the Amazon Linux and signed GitHub repositories.
 RUN curl -fsSL https://cli.github.com/packages/rpm/gh-cli.repo -o /etc/yum.repos.d/gh-cli.repo \
     && rpm --import https://cli.github.com/packages/githubcli-archive-keyring.asc \
-    && dnf install -y python3.13 git shadow-utils nodejs22 nodejs22-npm awscli-2-2.38.0 gh-2.103.3 \
+    && dnf install -y python3.13 python3.13-pip git shadow-utils nodejs22 nodejs22-npm awscli-2-2.38.0 gh-2.103.3 \
     && dnf clean all
 # Repository python3 commands use the selected runtime; leave the OS interpreter intact.
 RUN ln -s /usr/bin/python3.13 /usr/local/bin/python3
+# Install only version-pinned runtime SDK dependencies for the selected interpreter.
+COPY image/requirements.txt /opt/factory/image/requirements.txt
+RUN python3.13 -m pip install --no-cache-dir -r /opt/factory/image/requirements.txt
 # npm supplies the ARM64 bundle; expose its required search and sandbox helpers.
 RUN npm install --prefix /opt/codex --no-audit --no-fund @openai/codex@0.166.0 \
     && vendor=/opt/codex/node_modules/@openai/codex-linux-arm64/vendor/aarch64-unknown-linux-musl \

@@ -3,65 +3,64 @@
 Status: done
 
 ## Slice Goal
-- Run the worker and repository tests on a maintained Linux ARM64 image Python runtime.
+- Initialize a Job using bounded boto3 runtime-identity and repository-secret checks.
 
 ## Slice Boundary
-- Operator builds and locally validates a newly selected image interpreter; startup, worker subprocesses, and repository tests use that interpreter without changing Job/status or security behavior.
+- Operator runs an authorized Job; SDK identity validation precedes secret retrieval and repository/model access, retaining pending to stable ok/error and existing publication checks.
 
 ## Stories In Scope
-- `US-07 Run the worker on a maintained image Python runtime`
+- `US-08 Access runtime identity and the GitHub secret through boto3`
 
 ## Stories Completed In This Slice
-- `US-07 Run the worker on a maintained image Python runtime`
+- `US-08 Access runtime identity and the GitHub secret through boto3`
 
 ## Stories Remaining In This Slice
 - None.
 
 ## Contract Inputs
-- [openapi.yaml](../../openapi.yaml): unchanged Job/lifecycle/status and demonstration `python3 -m unittest discover -s tests -v` command.
-- [docs/contracts.md](../contracts.md): unchanged AWS submission boundaries.
+- [openapi.yaml](../../openapi.yaml): unchanged Job/lifecycle/status interfaces.
+- [docs/contracts.md](../contracts.md): unchanged submission boundaries; repository scripts are deferred to US-11.
 
 ## Decision Inputs
-- [DECISIONS.md](../../DECISIONS.md): US-07 interpreter evaluation, image validation, sandbox/snapshot safety, separate deployment authorization.
+- [DECISIONS.md](../../DECISIONS.md): approved boto3/Stubber dependency, scoped identity/secret access, CLI credential export/expiration retention, separate live authorization.
 
 ## Shared State Required Now
-- One explicitly selected image interpreter; existing `sys.executable` propagation for worker and acceptance subprocesses.
-- Preserve the demonstration test command by making image `python3` resolve to the selected interpreter, without replacing the OS interpreter used by packaged tools.
-- US-01–US-04 are complete. Gate 1 passed; US-04 passed on native-CDK image `2.0`, execution `gate2-us04-787d7a7ff18d40ab9f264f22734e29c7`, VM `microvm-d79268a3-d531-3bdb-825b-15a20d2566ba`, workflow-confirmed `TERMINATED`. All six retained VMs were TERMINATED at the last live inspection; no new live inspection is implied here.
-- Preserve secret `arn:aws:secretsmanager:us-east-1:172318459814:secret:software-factory-poc/github-token-sXayGQ` and open/unmerged demonstration PRs [#1](https://github.com/TeroTS/factory-smoke-test/pull/1), [#2](https://github.com/TeroTS/factory-smoke-test/pull/2), [#3](https://github.com/TeroTS/factory-smoke-test/pull/3). Baseline `74daa6e2bca790d0a62d4d9ab47f07bca48fbc12`, target `main`; successful US-04 head `14bd7bd93934281aa43407c6b2bd0c091eb8d025`. Earlier detailed gate evidence remains in git history.
+- Existing deployment-controlled expected role and GitHub-secret ARN; temporary credentials discovered by CLI and independently by the SDK's public credential provider chain.
+- Retain CLI expiration checks before setup and after completion; SDK refresh does not establish refresh in the separate Codex process.
+- Prior slices US-01–US-04 and US-07 are complete. Gate 1 passed; US-04 passed on native-CDK image `2.0`, execution `gate2-us04-787d7a7ff18d40ab9f264f22734e29c7`, VM `microvm-d79268a3-d531-3bdb-825b-15a20d2566ba`, workflow-confirmed `TERMINATED`. All six retained VMs were TERMINATED at the last live inspection, not newly inspected here.
+- Preserve secret `arn:aws:secretsmanager:us-east-1:172318459814:secret:software-factory-poc/github-token-sXayGQ` and open/unmerged demonstration PRs [#1](https://github.com/TeroTS/factory-smoke-test/pull/1), [#2](https://github.com/TeroTS/factory-smoke-test/pull/2), [#3](https://github.com/TeroTS/factory-smoke-test/pull/3). Baseline `74daa6e2bca790d0a62d4d9ab47f07bca48fbc12`, target `main`; earlier gate/runtime evidence remains in git history.
 
 ## Operations / Endpoints / Surfaces In This Slice
-- `image/Dockerfile`, lifecycle executable validation, Make preflight, runtime tests, Ruff compatibility configuration, and implementation documentation in this slice note only.
-- Availability evaluation: ARM64 base-container `dnf repoquery python3.13 python3.13-libs` succeeded and listed both versioned aarch64 packages through `3.13.16-1.amzn2023.0.1`. Initial `dnf list --available` was unsupported by microdnf; used its supported repoquery instead.
-- Selected Python 3.13 using the versioned AL2023 package after successful ARM64 preflight. Factory development Python 3.14 and dependency lockfiles remain unchanged.
+- `worker/task.py`, connected worker tests, `pyproject.toml`/`uv.lock`, image runtime dependency pins/Docker context, and native CDK image source staging.
+- boto3 `1.43.123` and compatible transitive versions are locked in `uv.lock`; image runtime-only requirements include exact versions from that lock, without hashes at the operator's request. No development dependencies are installed in the image. Versioned AL2023 ARM64 `python3.13-pip` availability was checked via base-container `dnf repoquery`.
 
 ## Tests Required
-- Regression for versioned image startup and `python3` interpreter mapping; confirm existing worker subprocesses retain the running interpreter.
-- Real Linux ARM64 sandbox check confirms Python 3.13 and repository test subprocess selection, plus edit/test/Git compatibility.
-- Focused worker/lifecycle tests, `make verify`, `make preflight`, local synthesis for image staging, and whitespace/affected documentation link checks.
+- Stubber success and identity/secret failures; wrong account/role, invalid token, expired/missing credentials, sanitized diagnostics, and bounded requests.
+- Complete local checkout/test/Git Job with simulated AWS/agent/GitHub services, retaining one agent invocation and independent completion checks.
+- Focused worker/image/staging tests, `make verify`, `make preflight`, `make synth`, and whitespace/link checks.
 
 ## Not Now
-- US-08 boto3, US-09 stage extraction, US-10 static Codex configuration, US-11–US-14 generic worker/workflow/tests.
-- AWS deployment/image pin update, secret retrieval, model/GitHub calls, live jobs, and US-05/US-06 demonstrations; all require separate authorization.
-- No host runtime installation, OS interpreter replacement, sandbox relaxation, or new dependency.
+- US-09 stage extraction, US-10 static Codex configuration, US-11–US-14 generic worker/workflow/tests.
+- AWS deployment, image/version pin update, live credentials/model/GitHub calls, and US-05/US-06 demonstrations; separate authorization required.
+- README.md, AGENTS.md, DECISIONS.md changes, private botocore expiry attributes, credential forwarding to Codex, or automatic Job retries.
 
 ## Done When
-- Python 3.13 package availability is verified on the actual ARM64 base, and the built image runs startup/worker/subprocess/repository tests on that interpreter.
-- Focused tests, `make verify` and `make preflight` pass; runtime settings and documentation agree while contracts, snapshot cleanliness, and security/failure handling remain intact.
-- Local image validation is distinguished from separately authorized AWS image/model/credential validation and deployment.
+- Identity and secret retrieval use validated bounded SDK responses; unauthorized or failed setup cannot reach repository/model access and emits no secret-bearing errors.
+- CLI credentials/expiration and availability, publication/sandbox/status guarantees remain intact; host and ARM64 checks pass.
+- Local completion and remaining real MicroVM credential-provider validation are distinguished explicitly.
 
 ## Completion Summary
-- US-07 is complete locally: the ARM64 image installs `python3.13`, starts the server with `python3.13`, and maps repository `python3` commands/shebangs to it via `/usr/local/bin/python3`. `/usr/bin/python3` is not replaced. Existing `sys.executable` worker/acceptance propagation is retained, and validation now checks the running interpreter rather than an unrelated PATH default.
-- Updated Make preflight to versioned interpreter invocations and Ruff worker/image/test targets to `py313`. Interpreter selection and implementation details are recorded here only; US-07-specific edits to README.md, AGENTS.md, and DECISIONS.md were reverted at the operator's direction. Job/lifecycle/status interfaces and the demonstration test command are unchanged; no new dependency or lockfile change. Python 3.13 natively parses credential-expiration `Z` suffixes; removed the obsolete replacement and used `datetime.UTC` to satisfy newly applicable Ruff rules. Credential expiry/identity/redaction regressions remain intact.
-- Test-first checks failed against old sources for package/startup selection and executable validation; real sandbox/runtime checks failed against the old Python 3.9 image. All passed after the runtime changes. Added checks for actual ARM64/version, both interpreter names, executable repository shebangs, nested sandbox test interpreter, and existing worker-spawn interpreter propagation.
-- Focused host image/runtime, lifecycle (six), and worker (18) tests passed. `make verify` passed format/lint/logging and 42 discovered tests (40 passed; two Docker-only tests host-skipped); branch-aware coverage remains 93% with unchanged `tools/worker/infra/image` scope and missing lines. No decrease or lowered gate.
-- `make preflight` passed the rebuilt ARM64 image's actual sandbox validation and 26 tests: two real sandbox/runtime checks, 18 worker/evidence tests, and six lifecycle tests. The built image reports Python `3.13.16`, package/libraries `3.13.16-1.amzn2023.0.1.aarch64`, local Docker image `sha256:04861743204fec8f155f7611de7bdf50807f5569003c8dc752b3de5af3180a83`. Containers used no host credentials or external networking; only the outer Docker seccomp filter was disabled for nested namespaces, not Codex isolation.
-- A separate credential-free, network-disabled container using the unmodified default CMD proved the actual Python 3.13 server process, HTTP ready/validate 200, exact pending status, and empty workspace after validation; container cleanup succeeded. This is the focused local image end-to-end check, not a live coding job.
-- `make synth` passed native image source staging/all three stacks. The existing Node 25.4.0/jsii supported-version warning remains (Node 22/24 recommended); no host toolchain installation or replacement. Initial verification correctly rejected newly applicable datetime lint issues, which were fixed before the successful full rerun.
-- `git diff --check` and affected Markdown local-link/fence-balance checks passed. External links were not fetched.
-- At the operator's direction, removed broad documentation/decision-update mandates from US-08–US-14 in SPEC.md. Those stories now explicitly keep implementation details and live-run guidance in this slice note, without authorizing README.md, AGENTS.md, or DECISIONS.md edits. Required interface-contract changes, tests, and live-run safety requirements remain intact.
-- No AWS deployment, active-image pin change, secret/credential retrieval, model access, GitHub write, or live job occurred. The deployed image/workflow remain untouched. Local validation does not establish real MicroVM credential-provider/model compatibility for the rebuilt image; AWS image/runtime validation and deployment need separate authorization.
+- US-08 is complete locally. STS `get_caller_identity()` and Secrets Manager `get_secret_value(SecretId=...)` now use boto3's public default runtime credential-provider chain with explicit `us-east-1`. Clients are closed via standard-library `closing()`. Each service request has a 5-second connect timeout, 10-second read timeout, and one total attempt (no API or Job retry); these settings do not introduce a worker deadline or change the existing CLI export behavior.
+- CLI credential export/expiration validation remains before setup and after independent completion. SDK identity must match both account `172318459814` and the expected assumed-role ARN prefix before secret access; secret must be a nonempty, nonblank string. Secret/model/repository access stops on initialization failure. Stage diagnostics and exception class are retained, not secret-bearing SDK exception messages. Credentials are not copied into subprocess environment variables and no private botocore expiration attributes are used. SDK refresh is not evidence of credential refresh within Codex.
+- Approved boto3 and botocore pins are both `1.43.123`; installed metadata requires Python >=3.10, and actual image execution passed on Linux ARM64 Python `3.13.16`. `uv add` updated `pyproject.toml`/`uv.lock`; boto3's required compatible `python-dateutil==2.9.0.post0` replaces the earlier development resolution `3.0.0`. CDK/constructs/Ruff/coverage pins remain unchanged. Runtime-only exact versions are stored in `image/requirements.txt`, exported with `uv export --locked --no-dev --no-emit-project --no-header --no-hashes -o image/requirements.txt`; image installation uses versioned Python pip without `--require-hashes`, at the operator's request. Version pins remain intact; pip no longer checks downloaded package files against lockfile hashes. Docker context and CDK source staging include that file. Pin-consistency tests guard against drift; no development tools or host credentials enter the image.
+- Test-first worker checks rejected old CLI identity/secret access (17 failing assertions, no test errors after fixing malformed-response fixture validation); image integration and staging checks likewise failed against old sources. All pass now. Real botocore Stubber clients validate request parameters and successful responses; the complete local Job consumes two identity checks and one scoped secret response while exercising real checkout/tests/Git with simulated Codex/GitHub publication. Additional regressions cover administrator/wrong-account identities, account/ARN mismatch, missing/expired/malformed CLI credentials before SDK access, missing/binary/empty/blank secrets, sanitized SDK errors, no repository/model work on setup failure, and retained publication/redaction checks. Only the deliberately malformed empty-secret response bypasses Stubber's response-length validation during fixture registration.
+- Focused commands `uv run --locked python -m unittest discover -s tests -p test_worker.py -v`, corresponding `test_image_runtime.py` and `test_infra.py` discovery passed (20, two, and six tests). `make verify` passed format-check, lint, coverage/tests, and logging: 46 discovered, 44 passed, two Docker-only host skips. Branch-aware coverage rose from the previous slice's reported 93% to 94%; `tools/worker/infra/image` measurement scope and missing-line reporting are unchanged, with no lowered gate.
+- `make preflight` passed the rebuilt image's sandbox validation and 28 tests (two actual ARM64 sandbox/runtime, 20 worker/evidence, six lifecycle). Containers ran without host credentials or external networking, with metadata disabled. Only Docker's outer seccomp filter was disabled to allow nested namespaces; Codex's workspace-write sandbox remains enforced. After removing requirement hashes and rebuilding, local image is `sha256:133ced11268b5fc5c342fb09e5b62dca940a89a470f67712f20dfbc1fcd7ed93`. A separate network-disabled image command confirmed Python/boto3/botocore versions and interpreter compatibility metadata.
+- `make synth` passed all three native stacks and staged runtime requirements into the content-addressed image source. The pre-existing Node `25.4.0`/jsii supported-version warning remains; Node 22/24 is recommended, with no host installation/replacement performed. `git diff --check` and current-slice local-link/fence checks passed; external links were not fetched.
+- Operator-requested hash removal also updated the Docker installation comment/flags and image regression test. The focused test failed against hash-enforced installation and passed after removal. `make verify`, `make preflight`, `make synth`, and whitespace/local-link checks were rerun successfully; test counts and 94% coverage are unchanged. `uv.lock` retains its normal artifact hashes and was not changed for this follow-up.
+- No AWS deployment, active-image pin change, real secret/credential retrieval, model access, GitHub write, or live Job occurred. Deployed image/workflow and scoped secret/PRs remain untouched. Real MicroVM default credential-provider compatibility, selected model access, and cross-process refresh remain live verification gaps, not inferred from Stubber or local ARM64 tests.
+- Live continuation requires separate authorization, scoped provisioning/runtime permissions, image-build/VM/model costs, and retained VM ID/manual termination access. Build/deploy the reviewed image source only after authorization, then read back its new pin with `uv run --locked python tools/verify_image.py --version <new-version>` before workflow deployment. A separately approved Job must prove SDK identity/secret initialization, existing Codex credential discovery and expiry behavior, publication, and service-confirmed cleanup using the unchanged structured Job/status interfaces. Never forward host credentials into image checks or treat SDK refresh as proof of Codex refresh.
 
 ## Next Slice Recommendation
-- `US-08 Access runtime identity and the GitHub secret through boto3`: choose/pin compatible approved dependencies, bound STS/Secrets Manager requests, retain CLI credential export/expiration guards, and use Stubber regression tests. Keep US-09 stage extraction and US-10 static Codex policy as adjacent deferred work.
-- Do not deploy or run jobs implicitly. Revalidate/pin each new AWS image under separate authorization; preserve the scoped secret and open/unmerged PRs. Deliver US-08–US-14 before the separately authorized US-05/US-06 live demonstrations.
+- `US-09 Execute a job through explicit worker stages`: extract environment preparation, repository preparation, agent invocation, and independent completion verification with explicit inputs/returns; retain coordination and final credentials check in `execute()`.
+- Keep US-10 static configuration and US-11 repository scripts as deferred adjacent work. Deliver US-08–US-14 before separately authorized US-05/US-06 demonstrations; no deployment or live Job is implicit.

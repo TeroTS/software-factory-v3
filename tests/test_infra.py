@@ -114,6 +114,17 @@ class InfrastructureTests(unittest.TestCase):
                 )
             )
 
+    def test_staged_image_contains_pinned_runtime_dependencies(self):
+        from infra.stacks import stage_source
+
+        staged = Path(stage_source(self.directory.name))
+        root = Path(__file__).resolve().parents[1]
+        self.assertTrue((staged / "image/requirements.txt").is_file())
+        self.assertEqual(
+            (staged / "image/requirements.txt").read_bytes(),
+            (root / "image/requirements.txt").read_bytes(),
+        )
+
     # Ensures synthesized cleanup preserves workflow state after a termination
     # request, so the VM ID remains available for confirming actual termination.
     def test_synthesized_termination_retains_vm_id_for_confirmation(self):

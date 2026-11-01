@@ -5,14 +5,23 @@ import re
 import subprocess
 import sys
 import uuid
+from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
+
+import boto3
+from botocore.config import Config
 
 from worker.evidence import TEST_COMMAND, verify_events, verify_pr, verify_source
 from worker.server import parse_job
 
 FILES = ("calculator.py", "tests/test_calculator.py")
 ACCEPTANCE = Path(__file__).resolve().parents[1] / "image/acceptance.py"
+AWS_CONFIG = Config(
+    connect_timeout=5,
+    read_timeout=10,
+    retries={"mode": "standard", "total_max_attempts": 1},
+)
 
 
 # Capture a subprocess without a shell; callers decide whether its output is safe to log.
@@ -79,13 +88,19 @@ def credentials(env, secrets):
     expiry = datetime.fromisoformat(values.get("Expiration", ""))
     if expiry <= datetime.now(UTC):
         raise ValueError("Runtime credentials expired")
-    identity = json.loads(
-        capture(["aws", "sts", "get-caller-identity", "--output", "json"], None, env)
-    )
+    with closing(
+        boto3.client("sts", region_name=env["AWS_REGION"], config=AWS_CONFIG)
+    ) as client:
+        identity = client.get_caller_identity()
     expected = (
         "arn:aws:sts::172318459814:assumed-role/" + env["EXPECTED_RUNTIME_ROLE"] + "/"
     )
-    if not identity.get("Arn", "").startswith(expected):
+    arn = identity.get("Arn")
+    if (
+        identity.get("Account") != "172318459814"
+        or not isinstance(arn, str)
+        or not arn.startswith(expected)
+    ):
         raise ValueError("Unexpected execution role; refusing secret/model access")
     print(
         "Scoped execution-role credential discovery passed; expires "
@@ -184,21 +199,12 @@ def execute(job):
     print("Discover scoped runtime credentials", flush=True)
     initial_access = credentials(env, secrets)
     print("Retrieve repository-scoped GitHub token", flush=True)
-    token = json.loads(
-        capture(
-            [
-                "aws",
-                "secretsmanager",
-                "get-secret-value",
-                "--secret-id",
-                env["GITHUB_SECRET_ARN"],
-                "--output",
-                "json",
-            ],
-            None,
-            env,
+    with closing(
+        boto3.client("secretsmanager", region_name=env["AWS_REGION"], config=AWS_CONFIG)
+    ) as client:
+        token = client.get_secret_value(SecretId=env["GITHUB_SECRET_ARN"]).get(
+            "SecretString"
         )
-    ).get("SecretString")
     if not isinstance(token, str):
         raise TypeError("Invalid repository-scoped GitHub token")
     if not token.strip():
@@ -317,6 +323,7 @@ def execute(job):
         )
     )
     verify_pr(prs, branch, head, job["baseSha"])
+    print("Rediscover scoped runtime credentials after completion", flush=True)
     refreshed_access = credentials(env, secrets)
     print(
         "Runtime credentials rediscovered; rotated: "

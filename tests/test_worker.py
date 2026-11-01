@@ -9,6 +9,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import boto3
+from botocore.stub import Stubber
+
 BASE = "def add(a, b):\n    return a + b\n"
 TESTS = """import unittest
 from calculator import add
@@ -208,6 +211,75 @@ class WorkerTests(unittest.TestCase):
         self.prs = []
         self.agent_calls = 0
         self.clone_url = "https://github.com/TeroTS/factory-smoke-test.git"
+        self.sdk()
+        self.client_patch = patch("boto3.client", side_effect=self.sdk_client)
+        self.client_mock = self.client_patch.start()
+        self.addCleanup(self.client_patch.stop)
+
+    def sdk(self, identity=None, secret=None, identity_error=None, secret_error=None):
+        self.clients = {}
+        self.stubbers = {}
+        for service in ("sts", "secretsmanager"):
+            client = boto3.Session().client(
+                service,
+                region_name="us-east-1",
+                aws_access_key_id="synthetic-access",
+                aws_secret_access_key="synthetic-secret",
+                aws_session_token="synthetic-session",
+            )
+            stubber = Stubber(client)
+            if service == "sts":
+                response = (
+                    identity
+                    if identity is not None
+                    else {
+                        "Account": "172318459814",
+                        "Arn": "arn:aws:sts::172318459814:assumed-role/software-factory-poc-runtime/session",
+                        "UserId": "synthetic-user",
+                    }
+                )
+                for _ in range(2):
+                    if identity_error:
+                        stubber.add_client_error(
+                            "get_caller_identity",
+                            service_message=identity_error,
+                            expected_params={},
+                        )
+                    else:
+                        stubber.add_response("get_caller_identity", response, {})
+            elif secret_error:
+                stubber.add_client_error(
+                    "get_secret_value",
+                    service_message=secret_error,
+                    expected_params={"SecretId": "secret-arn"},
+                )
+            else:
+                # Permit a malformed empty service response to exercise our trust boundary.
+                with (
+                    patch("botocore.stub.validate_parameters")
+                    if secret == {"SecretString": ""}
+                    else contextlib.nullcontext()
+                ):
+                    stubber.add_response(
+                        "get_secret_value",
+                        secret
+                        if secret is not None
+                        else {"SecretString": "github_pat_synthetic_token"},
+                        {"SecretId": "secret-arn"},
+                    )
+            stubber.activate()
+            self.addCleanup(stubber.deactivate)
+            self.addCleanup(client.close)
+            self.clients[service] = client
+            self.stubbers[service] = stubber
+
+    def sdk_client(self, service, **kwargs):
+        self.assertEqual(kwargs["region_name"], "us-east-1")
+        config = kwargs["config"]
+        self.assertEqual(config.connect_timeout, 5)
+        self.assertEqual(config.read_timeout, 10)
+        self.assertEqual(config.retries, {"mode": "standard", "total_max_attempts": 1})
+        return self.clients[service]
 
     def git(self, *args):
         return subprocess.check_output(
@@ -228,14 +300,7 @@ class WorkerTests(unittest.TestCase):
                     "Expiration": "2099-01-01T00:00:00Z",
                 }
             )
-        if args[:3] == ["aws", "sts", "get-caller-identity"]:
-            return json.dumps(
-                {
-                    "Arn": "arn:aws:sts::172318459814:assumed-role/software-factory-poc-runtime/session"
-                }
-            )
-        if args[:3] == ["aws", "secretsmanager", "get-secret-value"]:
-            return json.dumps({"SecretString": "github_pat_synthetic_token"})
+        self.assertNotEqual(args[0], "aws", "Only credential export may use AWS CLI")
         if args[:2] == ["gh", "auth"]:
             return ""
         if args[:3] == ["gh", "pr", "list"]:
@@ -312,6 +377,8 @@ class WorkerTests(unittest.TestCase):
             self.task.execute(self.job)
         self.assertEqual(self.agent_calls, 1)
         self.assertEqual(len(self.prs), 1)
+        for stubber in self.stubbers.values():
+            stubber.assert_no_pending_responses()
         self.assertIn("exit code 0", logs.getvalue())
         for secret in ("github_pat_synthetic_token", "secret-access", "session-token"):
             self.assertNotIn(secret, logs.getvalue())
@@ -345,41 +412,46 @@ class WorkerTests(unittest.TestCase):
     # Rejects administrator identity before secret retrieval or agent work,
     # enforcing execution-role access rather than borrowed operator privileges.
     def test_identity_guard_refuses_administrator_before_secret_or_model(self):
-        def administrator(args, cwd, env, secrets=None):
-            if args[:3] == ["aws", "sts", "get-caller-identity"]:
-                return json.dumps(
-                    {
-                        "Arn": "arn:aws:sts::172318459814:assumed-role/AWSAdministratorAccess/session"
-                    }
-                )
-            self.assertNotEqual(args[:3], ["aws", "secretsmanager", "get-secret-value"])
-            return self.external(args, cwd, env)
-
-        with (
-            patch.dict(os.environ, self.env),
-            patch.object(self.task, "capture", side_effect=administrator),
-            contextlib.redirect_stdout(io.StringIO()),
-            self.assertRaises(ValueError),
+        for account, arn in (
+            (
+                "172318459814",
+                "arn:aws:sts::172318459814:assumed-role/AWSAdministratorAccess/session",
+            ),
+            (
+                "000000000000",
+                "arn:aws:sts::000000000000:assumed-role/software-factory-poc-runtime/session",
+            ),
+            (
+                "000000000000",
+                "arn:aws:sts::172318459814:assumed-role/software-factory-poc-runtime/session",
+            ),
         ):
-            self.task.execute(self.job)
-        self.assertEqual(self.agent_calls, 0)
+            self.sdk(identity={"Account": account, "Arn": arn, "UserId": "synthetic"})
+            with (
+                self.subTest(account=account, arn=arn),
+                patch.dict(os.environ, self.env),
+                patch.object(self.task, "capture", side_effect=self.external),
+                contextlib.redirect_stdout(io.StringIO()),
+                self.assertRaises(ValueError),
+            ):
+                self.task.execute(self.job)
+            self.assertFalse((self.root / "workspace").exists())
+            self.assertEqual(self.agent_calls, 0)
+        self.assertNotIn(
+            "secretsmanager", [call.args[0] for call in self.client_mock.call_args_list]
+        )
 
-    # Stops setup for missing/expired AWS credentials or an unusable GitHub token,
-    # preventing agent work from starting without validated runtime access.
-    def test_missing_expired_credentials_and_invalid_secret_are_rejected(self):
+    # Stops setup before SDK access for missing, expired, or malformed CLI credentials.
+    def test_missing_or_expired_cli_credentials_are_rejected(self):
         for override in (
             {"AccessKeyId": ""},
             {"Expiration": "2000-01-01T00:00:00Z"},
-            {"SecretString": None},
-            {"SecretString": ""},
+            {"Expiration": "invalid"},
         ):
 
             def invalid(args, cwd, env, secrets=None, override=override):
                 output = self.external(args, cwd, env)
-                if args[:3] in (
-                    ["aws", "configure", "export-credentials"],
-                    ["aws", "secretsmanager", "get-secret-value"],
-                ):
+                if args[:3] == ["aws", "configure", "export-credentials"]:
                     output = json.dumps({**json.loads(output), **override})
                 return output
 
@@ -392,6 +464,50 @@ class WorkerTests(unittest.TestCase):
             ):
                 self.task.execute(self.job)
         self.assertEqual(self.agent_calls, 0)
+        self.client_mock.assert_not_called()
+
+    def test_invalid_sdk_secret_stops_before_repository_or_agent(self):
+        for secret in (
+            {},
+            {"SecretBinary": b"synthetic"},
+            {"SecretString": ""},
+            {"SecretString": "  "},
+        ):
+            self.sdk(secret=secret)
+            with (
+                self.subTest(secret=secret),
+                patch.dict(os.environ, self.env),
+                patch.object(self.task, "capture", side_effect=self.external),
+                contextlib.redirect_stdout(io.StringIO()),
+                self.assertRaises((ValueError, TypeError)),
+            ):
+                self.task.execute(self.job)
+            self.assertFalse((self.root / "workspace").exists())
+        self.assertEqual(self.agent_calls, 0)
+
+    def test_sdk_failures_are_sanitized_and_stop_before_repository_or_model(self):
+        for stage in ("identity_error", "secret_error"):
+            self.sdk(
+                **{stage: "github_pat_synthetic_token secret-access session-token"}
+            )
+            with (
+                self.subTest(stage=stage),
+                patch.dict(os.environ, self.env),
+                patch.object(self.task, "capture", side_effect=self.external),
+                patch("sys.stdin", io.StringIO(json.dumps(self.job))),
+                contextlib.redirect_stdout(io.StringIO()) as logs,
+            ):
+                self.assertEqual(self.task.main(), 1)
+            self.assertIn("Worker failed: ClientError", logs.getvalue())
+            for value in (
+                "github_pat_synthetic_token",
+                "secret-access",
+                "session-token",
+            ):
+                self.assertNotIn(value, logs.getvalue())
+            self.assertFalse((self.root / "workspace").exists())
+        self.assertEqual(self.agent_calls, 0)
+        self.assertEqual(self.prs, [])
 
     # Rejects publication claims contradicted by remote/local Git or PR checks,
     # enforcing meaningful scoped changes on a task branch rather than trusting the agent.
@@ -405,6 +521,7 @@ class WorkerTests(unittest.TestCase):
             (["gh", "pr"], "[]"),
         )
         for index, (prefix, reply) in enumerate(replies):
+            self.sdk()
 
             def contradict(
                 args, cwd, env, secrets=None, index=index, prefix=prefix, reply=reply

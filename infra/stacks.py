@@ -37,12 +37,13 @@ SECRET = "arn:aws:secretsmanager:us-east-1:172318459814:secret:software-factory-
 ROOT = Path(__file__).resolve().parents[1]
 
 
-# Stage only Dockerfile and explicit worker sources; CDK uploads a content-addressed ZIP.
+# Stage Dockerfile, runtime dependency pins and worker sources as a content-addressed ZIP.
 def stage_source(outdir):
     source = Path(outdir) / "factory-source"
     (source / "worker").mkdir(parents=True, exist_ok=True)
     (source / "image").mkdir(exist_ok=True)
-    shutil.copyfile(ROOT / "image/acceptance.py", source / "image/acceptance.py")
+    for name in ("acceptance.py", "requirements.txt"):
+        shutil.copyfile(ROOT / "image" / name, source / "image" / name)
     shutil.copyfile(ROOT / "image/Dockerfile", source / "Dockerfile")
     for name in ("server.py", "task.py", "evidence.py"):
         shutil.copyfile(ROOT / "worker" / name, source / "worker" / name)
