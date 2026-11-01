@@ -1,17 +1,20 @@
 # Interface Contracts
 
-AWS-owned submission exchanges for the software factory PoC. Our HTTP
-interfaces and shared payload schemas are defined **only in
-[openapi.yaml](../openapi.yaml)**. Behavior and gate requirements remain in
-[SPEC.md](../SPEC.md) and [DECISIONS.md](../DECISIONS.md).
-The approved Gate 2 reset replaces infrastructure and worker
-implementation without changing these submission or HTTP contracts.
-Implementation and verification evidence belong in
-[the current slice](slices/current-slice.md).
+Source: [SPEC.md](../SPEC.md).
+
+AWS-owned submission mappings and the target-repository script boundary for the
+software factory PoC. Our HTTP interfaces and shared payload schemas are defined
+**only in [openapi.yaml](../openapi.yaml)**. Behavior and gate requirements remain
+in [SPEC.md](../SPEC.md) and [DECISIONS.md](../DECISIONS.md).
+These are accepted target contracts, not proof of implementation or live
+verification. Implementation and verification
+evidence belong in [the current slice](slices/current-slice.md).
 
 ## Operator → Step Functions: start a job
 
 **Operation:** AWS `StartExecution`, called through the AWS CLI or SDK in Gate 2.
+
+Transport: AWS API through CLI or SDK. Direction: request/reply.
 This is an AWS-owned interface, not an endpoint in our worker server.
 Full AWS contract: [StartExecution](https://docs.aws.amazon.com/step-functions/latest/apireference/API_StartExecution.html).
 
@@ -39,19 +42,64 @@ responses; no custom submission-error body is defined here.
 ## Gate 1 submission: Operator → Lambda MicroVMs
 
 **Operation:** AWS `RunMicrovm`, called manually instead of starting Step Functions.
-Supply the same `Job` serialization as the AWS API's `runHookPayload`; the
-launch response supplies `microvmId` and `endpoint`. Full launch parameters and
-AWS response examples are in the
+
+Transport: AWS API through CLI. Direction: request/reply.
+Authoritative AWS launch parameters and responses are in the
 [copied launching reference](aws-lambda-microvms/microvms-launching.md#microvms-launching-run).
 
-The resulting AWS-to-worker request envelope is defined by
-`openapi.yaml#/components/schemas/RunHookRequest`, not repeated here.
+### Request
+
+Supply JSON serialization of `openapi.yaml#/components/schemas/Job` as the AWS
+API's `runHookPayload`. The resulting AWS-to-worker request envelope is defined
+by `openapi.yaml#/components/schemas/RunHookRequest`, not repeated here.
+
+### Response
+
+AWS's launch response supplies `microvmId` and `endpoint` dynamically. It
+acknowledges launch, not task success or confirmed termination.
 
 ## HTTP contract source
 
 Read [openapi.yaml](../openapi.yaml) for lifecycle hooks, status polling,
 authentication, headers, request/response bodies, and the shared `Job` and
 `RunHookRequest` schemas. This document does not redefine them.
+
+## Worker / Codex → authorized target repository: setup and verification
+
+Transport: local executable scripts in the checked-out repository.
+Direction: request/reply (process invocation and exit result).
+Authoritative contract: this section.
+
+### Request
+
+| Caller → receiver | Operation | Required ordering |
+| --- | --- | --- |
+| Worker → repository `./scripts/setup` | Execute from the pinned repository root. | After checkout, before baseline verification and Codex. |
+| Worker → repository `./scripts/verify` | Execute from the pinned repository root. | After successful setup, before Codex. |
+| Codex → repository `./scripts/verify` | Execute from the working repository root. | Passing final verification is required before commit, push, and PR creation in the same agent invocation. |
+| Worker → repository `./scripts/verify` | Independently execute from the working repository root. | After the agent invocation, before reporting automated completion. |
+
+No additional Job fields or script-specific JSON request payload are defined.
+Setup and test tooling belong to the target repository scripts, not hardcoded
+factory test commands or calculator acceptance checks.
+
+### Response
+
+| Result | Meaning |
+| --- | --- |
+| Actual process exit code `0` | The script passed; verification alone does not establish task correctness or test adequacy. |
+| Nonzero exit code | Script failure. |
+| Available stdout/stderr | Command/test output retained with secret redaction; not returned in the status response. |
+
+### Interface Constraints
+
+| Constraint | Requirement |
+| --- | --- |
+| Script availability | Both paths must exist and be executable. Missing or non-executable scripts fail explicitly. |
+| Worker-side failure | Setup, baseline verification, or independent final verification failure is terminal; setup/baseline failure prevents Codex invocation. |
+| Agent-side test failure | Codex diagnoses, fixes, and reruns failing verification within its one invocation; no agent restart or whole-Job rerun. |
+| Completion | Independent final verification is necessary but not sufficient. Automated completion guarantees and limitations are defined in [SPEC.md](../SPEC.md). |
+| Repository authorization | Read `openapi.yaml#/components/schemas/Job`; supplying a repository string does not grant access. Script code can access runtime credentials. Another repository requires explicit trust/scoping review under [DECISIONS.md](../DECISIONS.md#data--state--ownership-decisions); existing credentials must not silently gain broader scope. |
 
 ## Sequence diagrams
 
