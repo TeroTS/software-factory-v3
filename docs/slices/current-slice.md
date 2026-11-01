@@ -448,7 +448,20 @@ Status: done
   were not repeated for this cleanup. No AWS changes were made.
 
 ## Next Slice Recommendation
-- US-05: demonstrate the approved nonexistent-base-SHA controlled failure with
-  no model invocation/PR and workflow-confirmed termination, after separate
-  operator authorization. Keep US-06's independent two-minute hard-lifespan
-  check in view; it also requires a separately authorized run.
+- Start with [US-07: Run the worker on a maintained image Python runtime](../../SPEC.md#us-07-run-the-worker-on-a-maintained-image-python-runtime).
+  Evaluate Python 3.13 package availability on Amazon Linux 2023 ARM64 before
+  selecting a version; align interpreter selection, startup/subprocesses,
+  compatibility settings, tests, and documentation. Run `make verify` and
+  `make preflight`; a new image requires validation and separate deployment
+  authorization. Do not treat the candidate version as already accepted.
+- Deliver one story per slice in the specification's order: US-08 boto3 access,
+  US-09 staged execution, US-10 Codex configuration, US-11 repository-agnostic
+  jobs, US-12 evidence simplification, US-13 CDK lifecycle simplification, and
+  US-14 generic/end-to-end tests. Reconcile affected decisions, vocabulary, and
+  contracts before implementation; requirements are in [SPEC.md](../../SPEC.md)
+  and [the follow-up plan](../plans/todo.md), not proof of implementation.
+- Keep US-04's completed evidence intact. After US-07–US-14, return to US-05's
+  nonexistent-base-SHA controlled failure and US-06's independent two-minute
+  hard-lifespan check. Both live demonstrations, additional task runs, deployment,
+  and destructive resource changes require separate operator authorization;
+  preserve the GitHub-token secret and existing unmerged PRs.

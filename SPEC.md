@@ -1,6 +1,15 @@
 # Product Specification
 
-Source: `DECISIONS.md`
+Source: `DECISIONS.md` and operator-approved follow-ups in
+[docs/plans/todo.md](docs/plans/todo.md).
+
+US-01–US-04 retain the original gate requirements. US-07–US-14 are ordered
+follow-ups before US-05/US-06; existing story IDs remain stable. As delivered,
+these follow-ups replace demonstration-specific worker validation with repository
+scripts and manual GitHub review, and replace the 30-second pending poll interval
+with 10 seconds. Reconcile conflicting decisions, vocabulary, and interface
+contracts before implementing the affected story; this backlog does not authorize
+deployment, live jobs, or destructive replacement.
 
 ## Summary
 - An operator-led software factory PoC that turns one approved coding task into
@@ -26,7 +35,7 @@ Source: `DECISIONS.md`
   work in GitHub.
 
 ## Non-Goals
-- Production readiness, hostile or arbitrary repositories, parallel jobs,
+- Production readiness, hostile or unapproved repositories, parallel jobs,
   multi-agent operation, load SLOs, durable queues, or concurrency-lock services.
 - Custom agent loops, agent restarts, automatic whole-task reruns, separate
   worker/polling deadlines, inference proxies, model API keys, OpenAI Agents API
@@ -278,8 +287,339 @@ Acceptance criteria:
   artifacts are downloaded.
 
 Deferred follow-ups:
+- US-07–US-14: Deliver the runtime, worker, configuration, workflow, and test
+  follow-ups below before the remaining gate demonstrations.
 - US-05: Demonstrate controlled failure and orchestrated cleanup.
 - US-06: Separately confirm automatic hard-lifespan termination.
+
+### US-07: Run the worker on a maintained image Python runtime
+Primary actor: Operator
+
+Trigger: The image runtime needs a maintained Python version.
+
+Happy-path action: Build and validate an image using an explicitly selected,
+maintained interpreter.
+
+Visible outcome: The worker, its subprocesses, and repository scripts execute
+successfully on the new Linux ARM64 runtime.
+
+Authoritative state transition: The image runtime changes from Python 3.9 to a
+newly validated, explicitly selected maintained version.
+
+Slice boundary: Image interpreter selection and affected startup, compatibility,
+and tests; one focused image check executes the worker with the new interpreter.
+Source: todo item 1.
+
+Acceptance criteria:
+- Evaluate Python 3.13 as a candidate, first checking versioned package
+  availability on Amazon Linux 2023 ARM64. Do not treat this candidate as an
+  accepted version before selection and compatibility validation.
+- Explicitly select the interpreter in the Dockerfile, worker startup,
+  subprocesses, and repository test/script execution. Update compatibility
+  settings, affected tests, and documentation consistently.
+- Run `make verify` and `make preflight`; validate the newly built image before
+  deployment. Factory Python 3.14 tooling does not establish image compatibility.
+- Preserve snapshot cleanliness, sandbox enforcement, and failure handling;
+  deployment and any externally managed runtime installation require separate
+  authorization.
+
+Deferred follow-ups:
+- US-08: Use boto3 for selected AWS operations.
+
+### US-08: Access runtime identity and the GitHub secret through boto3
+Primary actor: Operator
+
+Trigger: A compatible maintained image runtime is selected under US-07.
+
+Happy-path action: Run a job whose worker uses boto3 to check runtime identity
+and retrieve the authorized repository's GitHub token.
+
+Visible outcome: The job initializes with the same scoped identity and secret
+checks without parsing AWS CLI responses for these two operations.
+
+Authoritative state transition: Runtime authorization and token retrieval move
+from CLI subprocesses to validated SDK responses before repository/model access.
+
+Slice boundary: STS and Secrets Manager access, image dependency integration, and
+failure tests; one focused worker initialization check verifies scoped access.
+Source: todo item 2.
+
+Acceptance criteria:
+- Replace STS identity and Secrets Manager calls in `worker/task.py` with boto3
+  clients. Retain the expected account/role guard before secret access and
+  nonempty token validation.
+- Initially retain CLI credential export, expiration checks, and AWS CLI
+  availability. Do not use private botocore expiration attributes or assume
+  SDK refresh also refreshes credentials inside the separate Codex process.
+- Configure bounded API requests and sanitized failure reporting. Failed
+  authorization or secret retrieval reports error without secret-bearing logs,
+  automatic Job retries, or model access.
+- Use botocore `Stubber` in affected tests; retain identity, expiration,
+  invalid-secret, and redaction regressions. Pin the approved dependency using
+  project conventions; validate actual MicroVM credential-provider compatibility
+  under separate live-run authorization.
+- Run focused tests, `make verify`, and applicable image preflight checks.
+
+Deferred follow-ups:
+- US-09: Make worker execution stages explicit.
+
+### US-09: Execute a job through explicit worker stages
+Primary actor: Operator
+
+Trigger: Worker execution needs a readable stage boundary without changing behavior.
+
+Happy-path action: Run a job through environment preparation, repository
+preparation, agent invocation, and independent completion verification.
+
+Visible outcome: The same job succeeds or fails with unchanged stage ordering,
+validation, publication, and sanitized diagnostics.
+
+Authoritative state transition: `execute()` becomes a coordinator of focused
+functions while the Job lifecycle remains pending to stable ok/error.
+
+Slice boundary: `worker/task.py` and connected worker tests; one focused
+simulated-service job verifies the complete staged path. Source: todo item 3.
+
+Acceptance criteria:
+- Extract `prepare_environment()`, `prepare_repository()`, `invoke_agent()`, and
+  `verify_completion()`; keep coordination and the final credential check in
+  `execute()`.
+- Use explicit inputs/returns and existing helpers. Introduce no class, generic
+  workflow framework, or dependency merely for extraction.
+- Preserve order, trust-boundary validation, secret redaction, failure
+  propagation, and one Codex invocation with independent completion checks.
+- Update callers and meaningful success/failure tests; run focused tests and
+  `make verify`. This extraction alone does not change completion guarantees.
+
+Deferred follow-ups:
+- US-10: Separate static Codex policy from invocation arguments.
+
+### US-10: Run Codex with factory-owned static configuration
+Primary actor: Operator
+
+Trigger: Static Codex settings are mixed with per-job invocation arguments.
+
+Happy-path action: Run a job with approved Codex settings loaded from
+factory-owned configuration baked into the image.
+
+Visible outcome: The configured model/provider and security policies apply
+without the target repository overriding approved constraints.
+
+Authoritative state transition: Static settings move from inline CLI arguments
+to validated factory configuration; per-job arguments remain runtime values.
+
+Slice boundary: Codex configuration, invocation, and image integration; one
+focused invocation check confirms effective settings. Source: todo item 4.
+
+Acceptance criteria:
+- Move model/provider, sandbox mode/network access, web search, approval, and
+  shell environment policies into factory-owned configuration while retaining
+  accepted values and excluding secret values.
+- Keep `exec`, `--json`, `--ephemeral`, repository path, `.git` access, and stdin
+  prompt input in Python as invocation-specific arguments.
+- Verify loading and precedence with the pinned Codex version before choosing
+  the location. Repository configuration must not override approved constraints;
+  retain explicit enforcement where configuration alone is insufficient.
+- Test effective settings and invocation arguments, including override attempts;
+  run focused tests, `make verify`, and `make preflight`.
+
+Deferred follow-ups:
+- US-11: Run jobs against configuration-authorized repositories.
+
+### US-11: Run a job in an authorized repository using its scripts
+Primary actor: Operator
+
+Trigger: An approved repository other than the demonstration needs a coding job.
+
+Happy-path action: Submit the existing structured Job for a configuration-authorized
+repository with executable setup and verification scripts.
+
+Visible outcome: One Codex invocation publishes a task PR without calculator or
+Gate 2 smoke-repository assumptions in the worker.
+
+Authoritative state transition: The authorized Job moves from pending to stable
+ok only after independent script verification and matching Git/PR publication;
+unrecoverable failures become stable error.
+
+Slice boundary: All `worker/` code and affected configuration, callers, image,
+contracts, fixtures, and tests; one focused job against another authorized
+repository proves the script-based workflow. Source: todo item 5.
+
+Acceptance criteria:
+- Remove smoke-repository names, calculator task/file restrictions, fixed Python
+  test commands, and repository-specific validation from `worker/`. Use existing
+  configuration conventions for authorization, PR target, and necessary values;
+  generated infrastructure references remain deployment-controlled.
+- Preserve the Job fields (`repository`, `baseSha`, `task`), bounded structured
+  input, lifecycle/status contracts, and explicit rejection of unauthorized jobs.
+  Configuration authorization is not unrestricted or hostile-repository support.
+- Run `./scripts/setup` and baseline `./scripts/verify` from the pinned target
+  repository before Codex. Missing, non-executable, or failing scripts fail
+  explicitly. Instruct the same agent to run passing final `./scripts/verify`
+  before publication; independently run verification afterward.
+- Preserve one unique branch, one Codex edit–test–fix/publication invocation,
+  nonempty committed changes, baseline ancestry, clean workspace, matching remote
+  head, and one open unmerged PR. Do not restart the agent, rerun the whole task,
+  merge a PR, or publish directly to the configured target branch.
+- Coordinate removal of demonstration-specific evidence with US-12. Do not claim
+  automated proof of verification-before-publication after chronology validation
+  is removed; manual GitHub review judges change correctness and test adequacy.
+- Preserve scoped credentials, identity guards, sandbox enforcement, redaction,
+  and failure reporting. Review scripts' access to runtime credentials and
+  reconcile the controlled-repository trust assumption before enabling another
+  repository; never silently broaden credential scope.
+- Update affected contracts, decisions, vocabulary, fixtures, and documentation.
+  The factory's own Make-based workflow remains unchanged. Cover another
+  authorized repository, unauthorized input, missing/failing scripts, and
+  verification/publication failures; run focused tests, `make verify`, and
+  `make preflight` without adding a generic workflow framework.
+
+Deferred follow-ups:
+- US-12: Remove obsolete demonstration evidence validation entirely.
+
+### US-12: Review a task PR without calculator-specific acceptance gates
+Primary actor: Human reviewer
+
+Trigger: Repository-agnostic jobs use the script contract from US-11.
+
+Happy-path action: Inspect the published GitHub diff and tests to judge task
+correctness and test adequacy.
+
+Visible outcome: A mechanically verified task PR is available for human review
+without rejection for altering baseline code or missing calculator operand cases.
+
+Authoritative state transition: Automated completion relies on final script and
+Git/PR checks rather than baseline AST preservation or command chronology; task
+correctness remains a human review decision, not an automatic merge.
+
+Slice boundary: Removal of `worker/evidence.py`, calculator acceptance, and
+connected callers/tests/image references; one focused job changing existing code
+produces a matching PR without the obsolete evidence gates. Source: todo item 6.
+
+Acceptance criteria:
+- Remove `preserve_nodes()`, `verify_source()`, `verify_events()`, and unused
+  `command_words()`, including their callers and dedicated tests.
+- Move `verify_pr()` into `worker/task.py`, preserving generic PR validation,
+  regression coverage, and configuration-controlled repository-specific values.
+- Replace `TEST_COMMAND` with `./scripts/verify`, then delete
+  `worker/evidence.py` and unused imports.
+- Delete `image/acceptance.py`, its worker invocation/path constant, and associated
+  image/build references, documentation, and calculator-acceptance tests.
+  Do not relocate or retain those checks in demonstration testing.
+- Retain generic worker coverage in `tests/test_worker.py` and elsewhere for
+  credentials, verification failures, clean commits, and PR consistency; replace
+  repository-specific fixtures where necessary rather than deleting the suite.
+- Independent final verification and Git/PR checks remain required. Neither
+  those checks nor manual diff review proves verification preceded publication;
+  no structural protection against weakened tests remains. Reflect these reduced
+  automated guarantees in decisions, contracts, and documentation.
+- Run focused tests, `make verify`, and `make preflight`; investigate coverage
+  changes without hiding removed code through narrower measurement scope.
+
+Deferred follow-ups:
+- US-13: Simplify lifecycle orchestration using higher-level CDK constructs.
+
+### US-13: Run a job through a simplified CDK lifecycle workflow
+Primary actor: Operator
+
+Trigger: The repository-agnostic worker and validated pinned image are available.
+
+Happy-path action: Start one Standard execution whose CDK-defined workflow polls
+the worker and shares confirmed termination after either job outcome.
+
+Visible outcome: Success reaches Succeed only after worker ok and confirmed
+TERMINATED; failures retain a recovery ID and distinguish unconfirmed cleanup.
+
+Authoritative state transition: Execution moves from running to Succeed/Fail
+through fresh lifecycle/status observations and a shared termination sequence.
+
+Slice boundary: `infra/workflow.py`, stack integration, and transition/synthesis
+checks; one focused orchestration check follows launch through confirmed cleanup.
+Source: todo item 8, including its detailed state list.
+
+Acceptance criteria:
+- Remove `InspectImage`, `ImageReady`, `InspectVersion`, and `VersionReady` from
+  per-execution flow. Deployment supplies a newly validated, explicitly pinned
+  image/version plus role, networking, and logs; launch failures remain caught.
+  VM ID and endpoint are dynamic launch results, never static configuration.
+- Prefer `aws_cdk.aws_stepfunctions` high-level `StateMachine`, `Pass`, `Choice`,
+  `Wait`, `Succeed`, and `Fail` with explicit connections. Use
+  `aws_stepfunctions_tasks` for supported integrations; verify pinned-CDK
+  MicroVM/HTTP support and use `CustomState` only where necessary. Add no compute
+  or dependency upgrade solely to avoid a raw state.
+- Follow the state plan: Input → LaunchVM → CheckLaunch → WaitForVMToStart →
+  GetVMState → IsVMRunning → GetWorkerToken → CheckWorkerToken → PollWorker →
+  CheckWorkerStatus. Wait 5 seconds for startup; PENDING repeats a fresh lifecycle
+  call, RUNNING continues, and unexpected states enter failure handling.
+- Require a nonempty VM ID and endpoint, and one valid port-scoped token reused
+  across polls. A missing endpoint with a known ID enters termination; no known
+  ID ends in failure with lifespan/manual recovery as fallback.
+- Pending status follows WaitForWorker for 10 seconds, then PollWorker again;
+  each HTTP request remains bounded to 10 seconds. Worker ok enters RecordSuccess;
+  worker error, invalid/missing responses, and catchable post-launch API/HTTP
+  failures enter RecordFailure. Do not confuse completion with server readiness
+  or repeatedly evaluate stale data.
+- Both recorded outcomes enter TerminateVM → WaitForVMToTerminate (5 seconds) →
+  GetTerminationState → IsVMTerminated. TERMINATING repeats a fresh lifecycle
+  call; TERMINATED reaches EndResult, then JobSucceeded/JobFailed according to
+  the recorded outcome. Unexpected states and termination/confirmation failures
+  end in JobFailed with a cleanup-unconfirmed reason and retained known VM ID.
+- Cleanup is that shared sequence, not extra compute or a separate operation.
+  Additional output-shaping/choice/bookkeeping states are allowed where ASL
+  requires them; success never follows an unconfirmed termination request.
+- Preserve launch idempotency, scoped permissions, catches, result paths, the
+  28-minute workflow timeout, 30-minute VM lifespan, normal idle policy, and
+  token-safe final output/history restrictions. Timeout/cancellation still
+  bypasses Catch cleanup; retain manual recovery and lifespan safeguards.
+- Reconcile workflow requirements and test synthesized ASL, fresh polling,
+  invalid inputs/responses, API failures, cleanup, and timeout paths. Run focused
+  tests, `make verify`, and `make synth`; live deployment requires separate
+  authorization and validation of the new image pin and permissions.
+
+Deferred follow-ups:
+- US-14: Consolidate generic checks and end-to-end outcome tests.
+
+### US-14: Verify generic job outcomes with focused and end-to-end tests
+Primary actor: Operator
+
+Trigger: Worker and workflow follow-ups need a maintainable regression suite.
+
+Happy-path action: Run the generic local verification suite and, under separate
+authorization, the documented live end-to-end suite.
+
+Visible outcome: Tests expose success, script failure, and publication failure
+without smoke-task assumptions or removal of useful security/lifecycle coverage.
+
+Authoritative state transition: Regression coverage changes from smoke-specific
+and duplicate cases to focused generic checks plus explicit end-to-end outcomes.
+
+Slice boundary: Test/fixture consolidation and repeatable end-to-end checks with
+run guidance; one suite invocation reports the three required scenarios.
+Source: todo item 7.
+
+Acceptance criteria:
+- Classify tests by protected behavior, not Gate 2 origin. Remove duplicates and
+  smoke-task-specific cases; use repository-agnostic fixtures without restoring
+  the calculator acceptance checks removed under US-12.
+- Keep focused coverage for credential guards, authorization, lifecycle hooks,
+  stable terminal status, termination, verification failures, and Git/PR
+  consistency. Do not replace all focused tests with end-to-end checks.
+- Cover successful setup/verification and a matching PR followed by confirmed
+  termination; setup or verification failure followed by error and confirmed
+  termination; and publication failure followed by error and confirmed termination.
+  An uncertain publication may have remote effects; do not assume every such
+  failure guarantees no PR.
+- Keep simulated-service local checks credential-free. Live AWS/GitHub runs are
+  explicit and separately authorized, with documented credentials, costs, cleanup,
+  and run commands; ordinary `make verify` neither deploys nor creates resources.
+- Run focused tests, `make verify`, and applicable image/synthesis checks;
+  investigate coverage decreases without narrowing scope or lowering gates.
+  Preserve the two-gate order; local simulations do not replace US-05/US-06's
+  separately authorized real demonstrations.
+
+Deferred follow-ups:
+- US-05: Demonstrate controlled orchestration failure with cleanup.
+- US-06: Independently verify automatic hard-lifespan termination.
 
 ### US-05: Observe a controlled orchestration failure with cleanup
 Primary actor: Operator
