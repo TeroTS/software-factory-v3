@@ -1,7 +1,10 @@
+import json
 import os
 import subprocess
 import sys
 import tempfile
+import threading
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -11,6 +14,131 @@ from pathlib import Path
     "Real Linux sandbox is checked by make preflight",
 )
 class SandboxTests(unittest.TestCase):
+    # Read real pinned-Codex layers without contacting a model; bound the process even on bad output.
+    def read_config(self, root, home, overrides=()):
+        with tempfile.TemporaryFile(mode="w+") as errors:
+            process = subprocess.Popen(
+                ["codex", *overrides, "app-server", "--listen", "stdio://"],
+                cwd=root,
+                env={
+                    **os.environ,
+                    "HOME": str(home),
+                    "CODEX_HOME": str(home / ".codex"),
+                },
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=errors,
+                text=True,
+            )
+            timer = threading.Timer(15, process.kill)
+            timer.start()
+            try:
+                responses = []
+                for request in (
+                    {
+                        "id": 1,
+                        "method": "initialize",
+                        "params": {
+                            "clientInfo": {"name": "factory-preflight", "version": "1"},
+                            "capabilities": {"experimentalApi": True},
+                        },
+                    },
+                    {
+                        "id": 2,
+                        "method": "config/read",
+                        "params": {
+                            "includeLayers": True,
+                            "cwd": str(root),
+                        },
+                    },
+                ):
+                    process.stdin.write(json.dumps(request) + "\n")
+                    process.stdin.flush()
+                    for line in process.stdout:
+                        response = json.loads(line)
+                        if response.get("id") == request["id"]:
+                            self.assertNotIn("error", response)
+                            responses.append(response["result"])
+                            break
+                    else:
+                        errors.seek(0)
+                        self.fail(
+                            "Codex did not return configuration: " + errors.read()
+                        )
+                self.assertIn("/0.166.0 ", responses[0]["userAgent"])
+                return responses[1]
+            finally:
+                timer.cancel()
+                process.terminate()
+                process.communicate(timeout=5)
+
+    # Managed policy wins over even trusted project/user/session settings on the pinned CLI.
+    def test_factory_config_loading_and_override_precedence(self):
+        policy = Path("/etc/codex/managed_config.toml")
+        self.assertTrue(policy.is_file(), "Factory Codex policy missing from image")
+        self.assertEqual(policy.stat().st_uid, 0)
+        self.assertFalse(os.access(policy, os.W_OK))
+        self.assertFalse(os.access(policy.parent, os.W_OK))
+        expected = tomllib.loads(policy.read_text())
+        with tempfile.TemporaryDirectory(dir="/workspace") as directory:
+            root = Path(directory)
+            home = root / "home"
+            (home / ".codex").mkdir(parents=True)
+            (root / ".git").mkdir()
+            (root / ".codex").mkdir()
+            for attempt in (False, True):
+                with self.subTest(override_attempt=attempt):
+                    overrides = []
+                    if attempt:
+                        hostile = """model = "override-model"
+model_provider = "openai"
+sandbox_mode = "danger-full-access"
+web_search = "live"
+approval_policy = "on-request"
+[sandbox_workspace_write]
+network_access = false
+[shell_environment_policy]
+inherit = "none"
+ignore_default_excludes = false
+"""
+                        (root / ".codex/config.toml").write_text(hostile)
+                        (home / ".codex/config.toml").write_text(
+                            hostile
+                            + f'\n[projects.{json.dumps(str(root))}]\ntrust_level = "trusted"\n'
+                        )
+                        overrides = [
+                            "-c",
+                            'model="cli-override"',
+                            "-c",
+                            'sandbox_mode="danger-full-access"',
+                        ]
+                    result = self.read_config(root, home, overrides)
+                    for key, value in expected.items():
+                        if isinstance(value, dict):
+                            for name, setting in value.items():
+                                self.assertEqual(result["config"][key][name], setting)
+                        else:
+                            self.assertEqual(result["config"][key], value)
+                    managed = result["layers"][0]
+                    self.assertEqual(
+                        managed["name"],
+                        {
+                            "type": "legacyManagedConfigTomlFromFile",
+                            "file": str(policy),
+                        },
+                    )
+                    self.assertEqual(managed["config"], expected)
+                    if attempt:
+                        project = next(
+                            layer
+                            for layer in result["layers"]
+                            if layer["name"]["type"] == "project"
+                        )
+                        self.assertIsNone(project.get("disabledReason"))
+                        self.assertEqual(
+                            project["config"]["sandbox_mode"], "danger-full-access"
+                        )
+
     # Verify the actual ARM64 image runtime and both invocation names, including
     # script shebangs, before accepting the interpreter selection.
     def test_selected_runtime_and_repository_interpreter(self):

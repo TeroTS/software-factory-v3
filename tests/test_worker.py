@@ -182,6 +182,15 @@ class WorkerTests(unittest.TestCase):
         from worker import task
 
         self.task = task
+        config_patch = patch.object(
+            task,
+            "CODEX_CONFIG",
+            task.CODEX_CONFIG
+            if task.CODEX_CONFIG.is_file()
+            else Path(__file__).resolve().parents[1] / "image/managed_config.toml",
+        )
+        config_patch.start()
+        self.addCleanup(config_patch.stop)
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
@@ -321,11 +330,20 @@ class WorkerTests(unittest.TestCase):
 
     def agent(self, args, prompt, cwd, env, secrets):
         self.agent_calls += 1
-        self.assertIn('model_provider="amazon-bedrock-runtime"', args)
-        self.assertIn('shell_environment_policy.inherit="all"', args)
-        self.assertIn("shell_environment_policy.ignore_default_excludes=true", args)
-        self.assertIn("sandbox_workspace_write.network_access=true", args)
-        self.assertIn("workspace-write", args)
+        self.assertEqual(
+            args,
+            [
+                "codex",
+                "exec",
+                "--json",
+                "--ephemeral",
+                "-C",
+                str(cwd),
+                "--add-dir",
+                str(cwd / ".git"),
+                "-",
+            ],
+        )
         self.assertIn("gh pr create", prompt)
         self.assertNotIn(env["GH_TOKEN"], prompt)
         self.assertIn("same invocation", prompt)
@@ -364,6 +382,17 @@ class WorkerTests(unittest.TestCase):
             event("git push origin " + branch),
             event("gh pr create --base main"),
         ]
+
+    # Missing image policy must fail before invoking the agent rather than loading unsafe defaults.
+    def test_missing_factory_configuration_stops_before_agent(self):
+        with (
+            patch.object(self.task, "CODEX_CONFIG", self.root / "missing.toml"),
+            patch.object(self.task, "capture", return_value="codex-cli 0.166.0"),
+            patch.object(self.task, "run_agent") as agent,
+            self.assertRaisesRegex(ValueError, "factory Codex configuration"),
+        ):
+            self.task.invoke_agent(self.job, self.origin, "branch", self.env, [])
+        agent.assert_not_called()
 
     # Exercises real local checkout, tests, and Git with simulated external services,
     # checking one agent invocation, one PR, and secret-free passing-test logs.

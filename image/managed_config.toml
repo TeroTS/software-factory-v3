@@ -1,0 +1,13 @@
+# Factory policy for pinned Codex 0.166.0; the managed layer overrides repository/CLI settings.
+model = "us.openai.gpt-6.1-sol"
+model_provider = "amazon-bedrock-runtime"
+sandbox_mode = "workspace-write"
+web_search = "disabled"
+approval_policy = "never"
+
+[sandbox_workspace_write]
+network_access = true
+
+[shell_environment_policy]
+inherit = "all"
+ignore_default_excludes = true

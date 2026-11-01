@@ -24,6 +24,8 @@ RUN useradd --create-home factory \
 WORKDIR /opt/factory
 COPY worker /opt/factory/worker
 COPY image/acceptance.py /opt/factory/image/acceptance.py
+# Root-owned managed policy cannot be overwritten by the worker or cloned repository.
+COPY image/managed_config.toml /etc/codex/managed_config.toml
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 WORKSPACE=/workspace AWS_REGION=us-east-1
 USER factory
 EXPOSE 8080

@@ -3,5 +3,6 @@
 !image/Dockerfile
 !image/acceptance.py
 !image/requirements.txt
+!image/managed_config.toml
 !worker/
 !worker/*.py

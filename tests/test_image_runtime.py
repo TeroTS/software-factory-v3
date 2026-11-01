@@ -14,6 +14,33 @@ class ImageRuntimeTests(unittest.TestCase):
         self.assertIn("ln -s /usr/bin/python3.13 /usr/local/bin/python3", dockerfile)
         self.assertIn('CMD ["python3.13", "-m", "worker.server"]', dockerfile)
 
+    # Static policy is packaged separately from credentials and owned by root in the image.
+    def test_image_packages_factory_codex_policy(self):
+        root = Path(__file__).resolve().parents[1]
+        dockerfile = (root / "image/Dockerfile").read_text()
+        self.assertIn(
+            "COPY image/managed_config.toml /etc/codex/managed_config.toml", dockerfile
+        )
+        self.assertIn(
+            "!image/managed_config.toml", (root / ".dockerignore").read_text()
+        )
+        config = tomllib.loads((root / "image/managed_config.toml").read_text())
+        self.assertEqual(
+            config,
+            {
+                "model": "us.openai.gpt-6.1-sol",
+                "model_provider": "amazon-bedrock-runtime",
+                "sandbox_mode": "workspace-write",
+                "web_search": "disabled",
+                "approval_policy": "never",
+                "sandbox_workspace_write": {"network_access": True},
+                "shell_environment_policy": {
+                    "inherit": "all",
+                    "ignore_default_excludes": True,
+                },
+            },
+        )
+
     def test_image_installs_only_locked_runtime_dependencies(self):
         root = Path(__file__).resolve().parents[1]
         dockerfile = (root / "image/Dockerfile").read_text()

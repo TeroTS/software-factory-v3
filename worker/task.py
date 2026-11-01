@@ -17,6 +17,7 @@ from worker.server import parse_job
 
 FILES = ("calculator.py", "tests/test_calculator.py")
 ACCEPTANCE = Path(__file__).resolve().parents[1] / "image/acceptance.py"
+CODEX_CONFIG = Path("/etc/codex/managed_config.toml")
 AWS_CONFIG = Config(
     connect_timeout=5,
     read_timeout=10,
@@ -252,6 +253,8 @@ def invoke_agent(job, repository, branch, env, secrets):
     version = capture(["codex", "--version"], repository, env).strip()
     if version != "codex-cli 0.166.0":
         raise ValueError("Unexpected pinned Codex version")
+    if not CODEX_CONFIG.is_file():
+        raise ValueError("Missing factory Codex configuration")
     args = [
         "codex",
         "exec",
@@ -259,22 +262,6 @@ def invoke_agent(job, repository, branch, env, secrets):
         "--ephemeral",
         "-C",
         str(repository),
-        "-s",
-        "workspace-write",
-        "-m",
-        "us.openai.gpt-6.1-sol",
-        "-c",
-        'model_provider="amazon-bedrock-runtime"',
-        "-c",
-        'web_search="disabled"',
-        "-c",
-        "sandbox_workspace_write.network_access=true",
-        "-c",
-        'approval_policy="never"',
-        "-c",
-        'shell_environment_policy.inherit="all"',
-        "-c",
-        "shell_environment_policy.ignore_default_excludes=true",
         "--add-dir",
         str(repository / ".git"),
         "-",

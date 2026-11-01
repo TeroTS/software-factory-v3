@@ -119,6 +119,11 @@ class InfrastructureTests(unittest.TestCase):
 
         staged = Path(stage_source(self.directory.name))
         root = Path(__file__).resolve().parents[1]
+        self.assertTrue((staged / "image/managed_config.toml").is_file())
+        self.assertEqual(
+            (staged / "image/managed_config.toml").read_bytes(),
+            (root / "image/managed_config.toml").read_bytes(),
+        )
         self.assertTrue((staged / "image/requirements.txt").is_file())
         self.assertEqual(
             (staged / "image/requirements.txt").read_bytes(),
