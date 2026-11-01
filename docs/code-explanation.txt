@@ -1,0 +1,30 @@
+worker/task.py runs one controlled coding job inside a MicroVM, then checks that the agent really completed it.
+
+For example, adding multiply(a, b):
+
+1. Validates the job and temporary AWS credentials.
+2. Retrieves the GitHub token, clones the pinned repository revision, and creates a unique branch.
+3. Runs baseline tests.
+4. Starts one Codex invocation to edit, test, commit, push, and open a pull request.
+5. Independently checks tests, permitted changes, commit ancestry, remote branch, and PR.
+
+Logging redacts credentials. Failures return exit code 1; verified completion returns 0.
+
+------
+
+worker/server.py is the MicroVM’s control server, not the coding worker. It listens on port
+8080.
+
+- parse_job() validates incoming job data.
+- Runtime starts worker.task once, tracks its exit, and terminates its process group.
+- make_server() exposes lifecycle hooks: ready, validate, run, terminate.
+- /status returns pending, ok, or error.
+
+Example: a run request starts the worker and returns promptly. Polling shows pending until
+the worker exits: 0 means ok; otherwise error.
+
+Validation checks installed tools and sandbox execution. Authentication belongs to AWS
+ingress.
+
+------
+
