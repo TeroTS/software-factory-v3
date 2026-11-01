@@ -12,17 +12,6 @@ from unittest.mock import patch
 import boto3
 from botocore.stub import Stubber
 
-BASE = "def add(a, b):\n    return a + b\n"
-TESTS = """import unittest
-from calculator import add
-
-class CalculatorTests(unittest.TestCase):
-    # Preserves the demonstration's addition baseline while multiplication is added.
-    def test_add(self):
-        self.assertEqual(add(2, 3), 5)
-"""
-COMMAND = "./scripts/verify"
-
 
 def event(command, code=0, output=""):
     return {
@@ -36,144 +25,52 @@ def event(command, code=0, output=""):
     }
 
 
-class EvidenceTests(unittest.TestCase):
+class PublicationTests(unittest.TestCase):
     def setUp(self):
-        self.assertIsNotNone(
-            importlib.util.find_spec("worker.evidence"), "Completion verifier missing"
-        )
-        from worker import evidence
+        from worker import task
 
-        self.evidence = evidence
-        self.events = [
-            event("printf gate2-shell-ok", output="gate2-shell-ok"),
-            event(COMMAND),
-            event("git commit -m task"),
-            event("git push -u origin factory/task-test"),
-            event("gh pr create --base main"),
-        ]
+        self.task = task
 
-    # Requires successful shell/test evidence before publication and rejects agent
-    # errors, preventing a process exit or incomplete command history from proving success.
-    def test_passing_tests_precede_separate_publication_commands(self):
-        self.evidence.verify_events(self.events)
-        for events in (
-            [],
-            self.events[:2],
-            self.events[1:],
-            [*self.events[:1], event(COMMAND, 1), *self.events[2:]],
-            [self.events[0], *self.events[2:], self.events[1]],
-            [event("printf gate2-shell-ok", 101), *self.events[1:]],
-            [*self.events, {"type": "error", "message": "inference failed"}],
-        ):
-            with self.subTest(events=events), self.assertRaises(ValueError):
-                self.evidence.verify_events(events)
-        wrapped = [
-            event(
-                "/bin/bash -lc '" + item["item"]["command"] + "'",
-                output=item["item"]["aggregated_output"],
-            )
-            for item in self.events
-        ]
-        self.evidence.verify_events(wrapped)
+    def test_worker_owns_generic_pr_validation(self):
+        self.assertEqual(self.task.verify_pr.__module__, "worker.task")
 
-    # Allows remote checks to resolve uncertain publication while rejecting edits
-    # after testing/commit, protecting duplicate avoidance and the tested result.
-    def test_publication_timeouts_accept_agent_checks_of_existing_remote_work(self):
-        recovered = [
-            self.events[0],
-            self.events[1],
-            self.events[2],
-            event("git push origin branch", 1),
-            event("git ls-remote --heads origin branch"),
-            event("gh pr create --base main", 1),
-            event("gh pr view --json number"),
-        ]
-        self.evidence.verify_events(recovered)
-        with self.assertRaises(ValueError):
-            self.evidence.verify_events(
-                [*self.events[:3], event("python3 edit.py"), *self.events[2:]]
-            )
-        with self.assertRaises(ValueError):
-            self.evidence.verify_events(
-                [*self.events[:2], event("python3 edit.py"), *self.events[2:]]
-            )
-
-    # Requires a meaningful discoverable test addition without changing baseline
-    # assertions, preventing weakened or unchanged tests from manufacturing completion.
-    def test_preserved_baseline_tests_and_meaningful_new_test(self):
-        updated = (
-            TESTS.replace(
-                "from calculator import add", "from calculator import add, multiply"
-            )
-            + "\n    # Checks multiplication so source evidence includes a meaningful new assertion.\n    def test_multiply(self):\n        self.assertEqual(multiply(2, 3), 6)\n"
-        )
-        self.evidence.verify_source(
-            {"calculator.py": BASE, "tests/test_calculator.py": TESTS},
-            {
-                "calculator.py": BASE + "\ndef multiply(a, b):\n    return a * b\n",
-                "tests/test_calculator.py": updated,
-            },
-        )
-        for changed in (
-            updated.replace("add(2, 3), 5", "add(2, 3), 6"),
-            TESTS,
-            updated.replace("unittest.TestCase", "object"),
-        ):
-            with self.subTest(changed=changed), self.assertRaises(ValueError):
-                self.evidence.verify_source(
-                    {"calculator.py": BASE, "tests/test_calculator.py": TESTS},
-                    {
-                        "calculator.py": BASE
-                        + "\ndef multiply(a, b):\n    return a * b\n",
-                        "tests/test_calculator.py": changed,
-                    },
-                )
-
-    # Accepts a new test in a different class despite a shared method name,
-    # avoiding false rejection of valid additions that preserve baseline tests.
-    def test_new_test_class_can_reuse_baseline_method_names(self):
-        updated = (
-            TESTS.replace(
-                "from calculator import add", "from calculator import add, multiply"
-            )
-            + "\nclass MultiplicationTests(unittest.TestCase):\n    # Checks multiplication in a separate class to exercise same-name test acceptance.\n    def test_add(self):\n        self.assertEqual(multiply(2, 3), 6)\n"
-        )
-        self.evidence.verify_source(
-            {"calculator.py": BASE, "tests/test_calculator.py": TESTS},
-            {
-                "calculator.py": BASE + "\ndef multiply(a, b):\n    return a * b\n",
-                "tests/test_calculator.py": updated,
-            },
-        )
-
-    # Requires exactly one open, unmerged PR matching the verified task commit and
-    # pinned main baseline, keeping published work available for human review.
+    # Requires exactly one open, unmerged PR matching the task commit, pinned base,
+    # and configured target, keeping published work available for human review.
     def test_pr_must_match_branch_commit_baseline_and_be_open(self):
         pr = {
             "number": 2,
             "state": "OPEN",
             "mergedAt": None,
-            "baseRefName": "main",
+            "baseRefName": "release",
             "headRefName": "factory/task-test",
             "headRefOid": "b" * 40,
             "baseRefOid": "a" * 40,
         }
-        self.evidence.verify_pr([pr], "factory/task-test", "b" * 40, "a" * 40, "main")
+        self.task.verify_pr([pr], "factory/task-test", "b" * 40, "a" * 40, "release")
         for changes in (
             {"state": "CLOSED"},
             {"mergedAt": "now"},
+            {"headRefName": "wrong"},
             {"headRefOid": "wrong"},
-            {"baseRefName": "other"},
+            {"baseRefName": "main"},
             {"baseRefOid": "wrong"},
+            {"number": 0},
+            {"number": -1},
+            {"number": "2"},
         ):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
-                self.evidence.verify_pr(
-                    [{**pr, **changes}], "factory/task-test", "b" * 40, "a" * 40, "main"
+                self.task.verify_pr(
+                    [{**pr, **changes}],
+                    "factory/task-test",
+                    "b" * 40,
+                    "a" * 40,
+                    "release",
                 )
-        with self.assertRaises(ValueError):
-            self.evidence.verify_pr(
-                [pr, pr], "factory/task-test", "b" * 40, "a" * 40, "main"
-            )
+        for prs in ([], [pr, pr], [{}]):
+            with self.subTest(prs=prs), self.assertRaises(ValueError):
+                self.task.verify_pr(
+                    prs, "factory/task-test", "b" * 40, "a" * 40, "release"
+                )
 
 
 class WorkerTests(unittest.TestCase):
@@ -911,35 +808,6 @@ class WorkerTests(unittest.TestCase):
             ],
             ["./scripts/setup", "./scripts/verify", "agent", "./scripts/verify"],
         )
-
-    # Legacy acceptance tests remain dedicated to the obsolete module until US-12.
-    def test_acceptance_requires_committed_tests_for_all_operand_categories(self):
-        from image.acceptance import verify
-
-        (self.origin / "calculator.py").write_text(
-            BASE + "\ndef multiply(a, b):\n    return a * b\n"
-        )
-        (self.origin / "tests/test_calculator.py").write_text(
-            TESTS
-            + "\n    # Checks only a positive product, supplying deliberately incomplete acceptance coverage.\n    def test_multiply(self):\n        from calculator import multiply\n        self.assertEqual(multiply(2, 3), 6)\n"
-        )
-        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(ValueError):
-            verify(self.origin)
-
-    # Rejects a missing multiply function or one that loses negative results,
-    # independently checking required behavior rather than trusting submitted tests.
-    def test_independent_acceptance_rejects_wrong_multiplication(self):
-        from image.acceptance import verify
-
-        (self.origin / "calculator.py").write_text(BASE)
-        (self.origin / "tests/test_calculator.py").write_text(TESTS)
-        with self.assertRaises(AttributeError):
-            verify(self.origin)
-        (self.origin / "calculator.py").write_text(
-            BASE + "\ndef multiply(a, b):\n    return abs(a * b)\n"
-        )
-        with self.assertRaises(ValueError):
-            verify(self.origin)
 
     # Converts execution failure to a nonzero exit without printing its secret-bearing
     # exception, allowing lifecycle error reporting without credential disclosure.

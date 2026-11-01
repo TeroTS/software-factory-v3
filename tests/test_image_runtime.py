@@ -14,6 +14,12 @@ class ImageRuntimeTests(unittest.TestCase):
         self.assertIn("ln -s /usr/bin/python3.13 /usr/local/bin/python3", dockerfile)
         self.assertIn('CMD ["python3.13", "-m", "worker.server"]', dockerfile)
 
+    def test_image_excludes_obsolete_calculator_acceptance(self):
+        root = Path(__file__).resolve().parents[1]
+        self.assertFalse((root / "image/acceptance.py").exists())
+        self.assertNotIn("acceptance.py", (root / "image/Dockerfile").read_text())
+        self.assertNotIn("acceptance.py", (root / ".dockerignore").read_text())
+
     # Static policy is packaged separately from credentials and owned by root in the image.
     def test_image_packages_factory_codex_policy(self):
         root = Path(__file__).resolve().parents[1]

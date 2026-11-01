@@ -12,7 +12,6 @@ from pathlib import Path
 import boto3
 from botocore.config import Config
 
-from worker.evidence import verify_pr
 from worker.server import parse_job
 
 CODEX_CONFIG = Path("/etc/codex/managed_config.toml")
@@ -289,6 +288,27 @@ def invoke_agent(job, repository, branch, env, secrets):
     ):
         raise ValueError("Initial sandbox shell did not pass")
     return events
+
+
+# Check one open, unmerged PR against verified Git branch/head, pinned base, and configured target.
+def verify_pr(prs, branch, head, base, target):
+    if len(prs) != 1:
+        raise ValueError("Expected exactly one PR on task branch")
+    pr = prs[0]
+    expected = {
+        "state": "OPEN",
+        "mergedAt": None,
+        "baseRefName": target,
+        "headRefName": branch,
+        "headRefOid": head,
+        "baseRefOid": base,
+    }
+    if (
+        not isinstance(pr.get("number"), int)
+        or pr["number"] <= 0
+        or any(pr.get(key) != value for key, value in expected.items())
+    ):
+        raise ValueError("PR does not match verified unmerged task publication")
 
 
 # Independently verify scripts and Git/PR consistency; human review judges correctness, not publication chronology.

@@ -37,15 +37,17 @@ SECRET = "arn:aws:secretsmanager:us-east-1:172318459814:secret:software-factory-
 ROOT = Path(__file__).resolve().parents[1]
 
 
-# Stage Dockerfile, static policy, runtime pins and worker sources as a content-addressed ZIP.
+# Rebuild the generated staging directory with only current image/worker sources for the asset ZIP.
 def stage_source(outdir):
     source = Path(outdir) / "factory-source"
-    (source / "worker").mkdir(parents=True, exist_ok=True)
-    (source / "image").mkdir(exist_ok=True)
-    for name in ("acceptance.py", "requirements.txt", "managed_config.toml"):
+    if source.exists():
+        shutil.rmtree(source)
+    (source / "worker").mkdir(parents=True)
+    (source / "image").mkdir()
+    for name in ("requirements.txt", "managed_config.toml"):
         shutil.copyfile(ROOT / "image" / name, source / "image" / name)
     shutil.copyfile(ROOT / "image/Dockerfile", source / "Dockerfile")
-    for name in ("server.py", "task.py", "evidence.py"):
+    for name in ("server.py", "task.py"):
         shutil.copyfile(ROOT / "worker" / name, source / "worker" / name)
     return str(source)
 

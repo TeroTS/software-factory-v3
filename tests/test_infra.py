@@ -139,7 +139,23 @@ class InfrastructureTests(unittest.TestCase):
     def test_staged_image_contains_pinned_runtime_dependencies(self):
         from infra.stacks import stage_source
 
-        staged = Path(stage_source(self.directory.name))
+        staged = Path(self.directory.name) / "factory-source"
+        (staged / "stale.py").write_text("obsolete generated source\n")
+        stage_source(self.directory.name)
+        self.assertEqual(
+            {
+                str(path.relative_to(staged))
+                for path in staged.rglob("*")
+                if path.is_file()
+            },
+            {
+                "Dockerfile",
+                "image/requirements.txt",
+                "image/managed_config.toml",
+                "worker/server.py",
+                "worker/task.py",
+            },
+        )
         root = Path(__file__).resolve().parents[1]
         self.assertTrue((staged / "image/managed_config.toml").is_file())
         self.assertEqual(

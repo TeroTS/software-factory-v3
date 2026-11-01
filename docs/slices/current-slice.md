@@ -3,68 +3,67 @@
 Status: done
 
 ## Slice Goal
-- Run a coding Job in a configuration-authorized repository using its executable setup and verification scripts.
+- Make a mechanically verified task PR available for human review without obsolete calculator-specific acceptance gates.
 
 ## Slice Boundary
-- Operator submits the existing structured Job for an authorized repository; one Codex invocation publishes a task PR, and independent script and Git/PR checks move pending to stable ok, or unrecoverable failures move pending to stable error.
+- Human reviewer inspects the published diff and tests; automated completion relies on independent final repository verification and matching Git/PR publication, while correctness and test adequacy remain human judgments rather than automatic merge approval.
 
 ## Stories In Scope
-- `US-11 Run a job in an authorized repository using its scripts`
+- `US-12 Review a task PR without calculator-specific acceptance gates`
 
 ## Stories Completed In This Slice
-- `US-11 Run a job in an authorized repository using its scripts`
+- `US-12 Review a task PR without calculator-specific acceptance gates`
 
 ## Stories Remaining In This Slice
 - None.
 
 ## Contract Inputs
-- [openapi.yaml](../../openapi.yaml): unchanged Job fields and lifecycle/status shapes; required deployment-controlled repository authorization and PR target, and reduced automated completion guarantees.
-- [docs/contracts.md](../contracts.md): executable script ordering, failure handling, environment/CDK configuration, credential exposure, and manual-review boundary.
+- [openapi.yaml](../../openapi.yaml): unchanged Job/lifecycle/status shapes and reduced automated completion guarantees.
+- [docs/contracts.md](../contracts.md): script execution, generic Git/PR consistency, and manual-review boundary.
 
 ## Decision Inputs
-- [DECISIONS.md](../../DECISIONS.md): repository authorization/PR-target configuration, repository-scoped secret selection, script trust review, and US-11/US-12 evidence coordination.
-- Operator explicitly approved `AUTHORIZED_REPOSITORY` and `PR_TARGET_BRANCH` alongside the existing repository-scoped secret, failing closed when configuration is missing, with scripts' runtime credential exposure disclosed. This does not authorize another live repository, deployment, or broader credentials.
+- [DECISIONS.md](../../DECISIONS.md): approved removal of AST/chronology/calculator checks and preservation of generic PR checks. US-11 already disconnected obsolete checks and adopted `./scripts/verify`; this slice removes their modules and packaging, not new product policy.
 
 ## Shared State Required Now
-- Existing Job, subprocess environment, scoped runtime role and GitHub secret, repository checkout, unique branch, Git head, PR, and stable terminal status.
-- One authorized repository and configured PR target per image configuration. Native CDK parameters `AuthorizedRepository` and `PrTargetBranch` supply worker environment settings; defaults retain the original demonstration repository and `main`. The existing secret ARN, runtime identity guard, and scoped IAM policies remain unchanged.
-- Prior completed slices and gate evidence remain in git history. Deployed resources, active image pin, secret permissions, and unmerged PRs remain unchanged.
+- Existing authorized Job, scoped credentials, checkout, unique task branch, committed/remote head, configured PR target, and stable terminal status.
+- US-11 is complete locally; prior implementation and gate evidence remain in git history. Deployed resources, secret permissions, active image pin, and unmerged PRs are unchanged.
 
 ## Operations / Endpoints / Surfaces In This Slice
-- `worker/server.py`: bounded Job validation and fail-closed authorization before worker launch or credential retrieval.
-- `worker/task.py`: script-based preparation, repository-agnostic prompt and completion checks, retained initial sandbox probe, and terminal rejection of streamed agent errors even with process exit zero.
-- `worker/evidence.py`: generic PR validation now accepts the configured target; legacy script-command/AST helpers remain disconnected from completion until US-12 deletes them.
-- `infra/stacks.py`, `openapi.yaml`, `docs/contracts.md`, and connected worker/lifecycle/infrastructure tests. `tests/test_sandbox.py` now bounds app-server shutdown with kill-and-reap escalation after a SIGTERM timeout; configuration assertions are unchanged. Existing image source staging includes worker changes without a Dockerfile or Makefile change.
+- `worker/task.py`: own generic `verify_pr()` without changing its checks.
+- Remove `worker/evidence.py`, `image/acceptance.py`, their dedicated tests, and image/source-staging references in `image/Dockerfile`, `.dockerignore`, and `infra/stacks.py`.
+- Retain generic worker/security/script/Git/PR coverage in `tests/test_worker.py`; update image and staging regression tests.
+- Contract descriptions already disclose reduced guarantees; review them for any remaining obsolete requirements.
 
 ## Tests Required
-- Fail-closed missing/malformed configuration and unauthorized/malformed Job input; another synthetic authorized repository and a non-main PR target.
-- Real local checkout, executable setup and baseline verification before one simulated agent invocation, independent final verification, nonempty committed changes, ancestry, clean workspace, matching remote head, and one open unmerged matching PR.
-- Missing/non-executable/failing setup or verification, unavailable/failing final verification, invalid target branch, failed sandbox probe, agent errors, and contradictory Git/PR publication. Retain credentials, redaction, lifecycle, stable-status, and real image sandbox/configuration regressions.
-- Focused tests, `make verify`, `make preflight`, `make synth`, whitespace, affected local links, and OpenAPI YAML/internal-reference checks.
+- Focused PR checks for configured target, branch/head/base, open/unmerged state, positive PR number, and exactly one result.
+- Real local checkout and script verification with one simulated agent changing existing content, committing/pushing through local Git, and providing a matching simulated PR without source-preservation or publication chronology gates.
+- Retain credential/redaction, authorization, script failure, clean commits, remote/PR mismatch, lifecycle/status, and real sandbox/configuration coverage.
+- Focused tests, `make verify`, `make preflight`, `make synth`, whitespace and affected local links/formatting; investigate coverage changes without narrowing measurement scope.
 
 ## Not Now
-- US-12 physical deletion of `worker/evidence.py`, `image/acceptance.py`, obsolete AST/chronology helpers, dedicated tests, and image/build references; relocation of generic PR validation to `worker/task.py`.
-- US-13 workflow simplification and US-14 suite consolidation.
-- README.md, AGENTS.md, DECISIONS.md, dependency changes, new Job fields, classes/frameworks, agent retries, or changes to the factory Make workflow.
-- Deployment, active image updates, secret/token permission changes, another live repository, external model/GitHub Jobs, and US-05/US-06 demonstrations require separate authorization.
+- US-13 workflow simplification and US-14 broader suite consolidation.
+- README.md, AGENTS.md, DECISIONS.md, dependency changes, new Job fields, frameworks, agent retries, deployment, live Jobs, image-version activation, or broader repository/credential scope.
+- US-05/US-06 live demonstrations require separate authorization. Existing README/agent guidance references to removed acceptance code remain untouched under the explicit US-08–US-14 documentation boundary.
 
 ## Done When
-- Approved deployment configuration rejects unauthorized Jobs without broadening credential scope.
-- No demonstration repository/task/file/test restrictions gate the worker. Setup and baseline verification precede one Codex invocation; independent final script and matching Git/PR checks precede success.
-- Contracts disclose that independent verification and manual review do not prove verification-before-publication or protect against weakened tests after obsolete chronology/source checks are disconnected.
-- Focused tests, full verification, image preflight, and synthesis pass; coverage changes and live verification gaps are recorded here.
+- Obsolete evidence/calculator modules, dedicated tests, and runtime/build references are gone without relocation.
+- Independent final `./scripts/verify`, nonempty clean commits, baseline ancestry, matching remote head and exactly one open unmerged configured-target PR still gate success.
+- Contracts and this note disclose that automated success does not prove task correctness, adequate/unweakened tests, or verification-before-publication.
+- Required local checks pass and actual results, coverage changes, and live-verification gaps are recorded here.
 
 ## Completion Summary
-- US-11 is complete locally. Repository authorization and a nonblank configured PR target are required; repository strings must match configuration exactly. Git validates the configured target before scripts/Codex run, and a task branch cannot equal that target. Job fields and bounded input, asynchronous lifecycle hooks, and one-field stable terminal status are unchanged.
-- The worker executes repository-owned `./scripts/setup` and baseline `./scripts/verify` directly from the pinned checkout. Missing/non-executable scripts emit a fixed, explicit diagnostic; subprocess failures retain redacted output and actual exit codes. The same agent is instructed to repair failing verification and run passing final `./scripts/verify` before publication, without restarting or rerunning the Job. The worker independently executes verification afterward and preserves nonempty commits, ancestry, clean workspace, matching remote head, and exactly one open unmerged matching PR.
-- The local `example/authorized-project` fixture uses executable shell scripts and a greeting text file, targeting `release`. Its simulated agent changes existing content, runs verification, commits and pushes through real local Git, and supplies matching simulated PR data. It supplies only the initial shell probe, deliberately no publication chronology; successful completion therefore demonstrates removal of calculator, AST-preservation, and chronology gates. STS/Secrets Manager use botocore Stubber; Codex/model/GitHub services remain simulated. Credentials, failure propagation, pinned managed Codex policy, real sandbox enforcement, and final identity rediscovery are retained.
-- US-12 coordination is explicit: obsolete evidence and acceptance modules/tests remain packaged but are never called by the generic completion path. `TEST_COMMAND` in the legacy chronology helper now uses the script contract; `verify_pr()` accepts the configured target. No automated check establishes correctness, adequate/unweakened tests, or verification-before-publication. Human GitHub review judges correctness and test adequacy but cannot establish command chronology; success does not permit merging.
-- Test-first authorization, generic fixture/script workflow, configured target, streamed error handling, and missing-script diagnostics failed for their intended missing behavior, then passed. A fixture verification script initially failed to propagate its test exit status because its final printf returned zero; adding `set -e` corrected the fixture, and independent final-verification failure then exercised the intended path.
-- Focused `uv run --locked python -m unittest discover -s tests -p test_worker.py -v`, `-p test_server.py -v`, and `-p test_infra.py -v` passed (worker cases also rerun in full coverage and ARM64 preflight). `make verify` passed format-check, lint, branch coverage/tests, and logging: 59 discovered, 56 passed, three Docker-only host skips. Overall and `worker/task.py` coverage remain 94%; measurement scope and branch reporting are unchanged. An initial lint check identified three nested test contexts; only affected tests were corrected and the rerun passed.
-- `make preflight` passed image validation and all 39 ARM64 tests: three real runtime/config/sandbox checks, 29 worker/evidence checks, and seven lifecycle checks on Python 3.13. Container tests had no host credentials or external networking and disabled metadata access; only Docker's outer seccomp filter was disabled, not Codex's sandbox. The first preflight passed; final repeat runs exposed an existing app-server shutdown timeout after configuration had been returned. The test helper previously canceled its kill timer before attempting SIGTERM cleanup and left a running subprocess/open stream when its five-second communicate timeout expired. It now kills and reaps that test subprocess on timeout, retaining bounded cleanup and all config/sandbox assertions. The corrected rerun passed all 39 tests. Local image `sha256:e4f338e34956b6afbe8f500530739e3528e8beaf186ee5eb557eb88fa4cbec6d` is not an active AWS image pin.
-- `make synth` passed without AWS lookups/deployment and includes the approved environment parameter references, unchanged scoped secret permission, and updated staged worker sources. Existing Node 25.4.0/jsii warnings remain; Node 22/24 is recommended, with no installation or dependency upgrade performed. `git diff --check`, affected Markdown local-link/fence checks, and Ruby standard-library Psych OpenAPI YAML/internal-reference checks passed. A Node YAML-parser availability probe found none; no package was installed. No dedicated OpenAPI semantic validator, type-check, or CI command is configured.
-- No live Job, deployment, model call, external publication, runtime credential-provider/refresh proof, or another repository authorization occurred. Future live use requires separate authorization, a newly validated pinned image, reviewed repository/token scope and script credential exposure, an approved baseline containing executable scripts, retained VM ID, and confirmed cleanup. The original demonstration baseline must not be silently changed or assumed to already contain these scripts.
+- US-12 is complete locally. Deleted `worker/evidence.py` and `image/acceptance.py`, all six dedicated chronology/AST/calculator tests, and unused calculator fixtures/imports/constants. The disconnected `TEST_COMMAND` disappeared with its module; the active worker already uses `./scripts/verify`. No obsolete checks were relocated or restored.
+- `verify_pr()` now lives in `worker/task.py` with its existing validation and failure messages unchanged. Generic PR regressions now target `release` and cover branch/head/base mismatches, closed/merged PRs, invalid/missing numbers, and missing/duplicate results. All existing generic worker, credential, script, authorization, lifecycle, and workflow tests remain.
+- Removed acceptance packaging from `image/Dockerfile` and `.dockerignore`, and both obsolete modules from native CDK source staging. Staging rebuilds only its generated `factory-source` directory so previous synthesis cannot silently repackage removed files. The staging test plants stale content and requires exactly the current Dockerfile, runtime requirements, managed configuration, server, and task files.
+- The existing generic `example/authorized-project` job regression passed with real local checkout/scripts/Git, a simulated agent replacing existing greeting content, and matching simulated PR publication to `release`. Only the initial sandbox probe is supplied as command evidence; no source-preservation or verification-before-publication chronology gates apply. One agent invocation and independent final verification remain mandatory. STS/Secrets Manager use Stubber; model and GitHub services are simulated.
+- Reviewed `openapi.yaml` and `docs/contracts.md`; their existing US-11 descriptions already specify independent script/Git/PR completion and explicitly exclude automated correctness, test adequacy, AST preservation, and publication chronology, so no contract edit was necessary. Passing scripts do not protect against weakened tests. Human GitHub review remains required and does not establish command chronology or authorize merging. README.md, AGENTS.md, and DECISIONS.md remain unchanged per the story documentation boundary.
+- Test-first checks failed for the intended missing changes: PR validation still belonged to `worker.evidence`, obsolete acceptance still existed, and repeated staging retained obsolete/stale files. After implementation, focused `uv run --locked python -m unittest discover -s tests -p test_worker.py -v` (24), `-p test_image_runtime.py -v` (four), and `-p test_infra.py -v` (seven) passed. An initial formatting check identified two affected test files; only those were formatted with `uv run --locked ruff format tests/test_worker.py tests/test_infra.py`.
+- `make verify` passed formatting, lint, coverage/tests, and logging: 55 discovered, 52 passed, three Docker-only host skips. Six obsolete tests were removed and two packaging/ownership regressions added, explaining the net decrease from 59 tests. Overall coverage increased from the US-11 recorded 94% to 95%; `worker/task.py` increased from 94% to 95% with PR validation moved into its measurement. `infra/stacks.py` remains 100%, including both fresh and repeat staging. The configured source scope remains `tools`, `worker`, `infra`, and `image`, with branch and missing-line reporting unchanged; `image` now has no Python production module to report. No coverage gate was lowered or measurement scope narrowed.
+- `make preflight` passed image validation plus all 34 Linux ARM64 tests on Python 3.13: three real runtime/config/sandbox checks, 24 worker/publication checks, and seven lifecycle checks. Containers had no host credentials or external networking and metadata access was disabled; only Docker's outer seccomp filter was disabled for nested namespaces, not Codex's sandbox. An additional credential-free Docker assertion confirmed both deleted modules are absent from the built image. Local image `sha256:b278cbeb73121e44db3df5b47bee2a218d0fa3907e03cffbe805235d650d86f5` is not an active AWS image pin.
+- `make synth` passed without AWS lookups/deployment, regenerating the current source asset without obsolete files. Existing Node 25.4.0/jsii compatibility and CDK feature-flag notices remain; Node 22/24 is recommended. No dependencies, runtime credentials, image activation, permissions, or deployed resources were changed.
+- `git diff --check` and current-slice local-link/heading/fence checks passed. Runtime/build searches found no obsolete helper/module references except explicit regression assertions of absence. No dedicated OpenAPI semantic validator, type-check, or CI command is configured; unchanged contracts did not require new schema validation.
+- No live Job, AWS deployment, model call, external GitHub publication/review, or actual MicroVM credential-provider/refresh proof was attempted. Live use requires separate authorization, a newly validated pinned image, reviewed repository/token scope and script credential exposure, approved executable scripts/baseline, retained VM ID, and confirmed cleanup. Local simulated success does not establish the real gates.
 
 ## Next Slice Recommendation
-- `US-12 Review a task PR without calculator-specific acceptance gates`: physically delete disconnected obsolete evidence/acceptance modules and dedicated tests, relocate generic PR validation, and retain generic security/script/Git/PR coverage.
-- Keep US-13 workflow simplification and US-14 suite consolidation deferred; finish them before separately authorized US-05/US-06 demonstrations.
+- `US-13 Run a job through a simplified CDK lifecycle workflow`: replace per-execution image inspection and raw orchestration with the approved high-level/fresh-polling/shared-termination state plan, retaining scoped permissions and token-safe results.
+- Keep US-14 test consolidation in view, but defer it and separately authorized US-05/US-06 demonstrations.
