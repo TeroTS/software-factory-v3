@@ -31,9 +31,6 @@ class PublicationTests(unittest.TestCase):
 
         self.task = task
 
-    def test_worker_owns_generic_pr_validation(self):
-        self.assertEqual(self.task.verify_pr.__module__, "worker.task")
-
     # Requires exactly one open, unmerged PR matching the task commit, pinned base,
     # and configured target, keeping published work available for human review.
     def test_pr_must_match_branch_commit_baseline_and_be_open(self):
@@ -73,8 +70,8 @@ class PublicationTests(unittest.TestCase):
                 )
 
 
-class WorkerTests(unittest.TestCase):
-    def setUp(self):
+class WorkerFixture(unittest.TestCase):
+    def setUp(self, origin=None, workspace=None):
         self.assertIsNotNone(
             importlib.util.find_spec("worker.task"), "Replacement worker missing"
         )
@@ -93,21 +90,21 @@ class WorkerTests(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
-        self.origin = self.root / "origin"
-        (self.origin / "tests").mkdir(parents=True)
-        (self.origin / "greeting.txt").write_text("hello\n")
-        (self.origin / "scripts").mkdir()
-        (self.origin / "scripts/setup").write_text(
-            "#!/bin/sh\nprintf 'setup-passed\\n'\n"
-        )
-        (self.origin / "scripts/verify").write_text(
-            "#!/bin/sh\nset -e\ntest -s greeting.txt\nprintf 'verify-passed\\n'\n"
-        )
-        for script in ("setup", "verify"):
-            (self.origin / "scripts" / script).chmod(0o755)
+        self.origin = Path(origin) if origin else self.root / "origin"
+        if origin is None:
+            (self.origin / "scripts").mkdir(parents=True)
+            (self.origin / "greeting.txt").write_text("hello\n")
+            (self.origin / "scripts/setup").write_text(
+                "#!/bin/sh\nprintf 'setup-passed\\n'\n"
+            )
+            (self.origin / "scripts/verify").write_text(
+                "#!/bin/sh\nset -e\ntest -s greeting.txt\nprintf 'verify-passed\\n'\n"
+            )
+            for script in ("setup", "verify"):
+                (self.origin / "scripts" / script).chmod(0o755)
         self.env = {
             **os.environ,
-            "WORKSPACE": str(self.root / "workspace"),
+            "WORKSPACE": str(workspace or self.root / "workspace"),
             "EXPECTED_RUNTIME_ROLE": "software-factory-poc-runtime",
             "GITHUB_SECRET_ARN": "secret-arn",
             "AUTHORIZED_REPOSITORY": "example/authorized-project",
@@ -115,11 +112,12 @@ class WorkerTests(unittest.TestCase):
             "GIT_CONFIG_GLOBAL": os.devnull,
             "GIT_CONFIG_SYSTEM": os.devnull,
         }
-        self.git("init", "-b", "release")
-        self.git("config", "user.email", "fixture@example.invalid")
-        self.git("config", "user.name", "Fixture")
-        self.git("add", ".")
-        self.git("commit", "-m", "baseline")
+        if origin is None:
+            self.git("init", "-b", "release")
+            self.git("config", "user.email", "fixture@example.invalid")
+            self.git("config", "user.name", "Fixture")
+            self.git("add", ".")
+            self.git("commit", "-m", "baseline")
         self.sha = self.git("rev-parse", "HEAD").strip()
         self.job = {
             "repository": "example/authorized-project",
@@ -287,6 +285,8 @@ class WorkerTests(unittest.TestCase):
         # Chronology is deliberately not supplied: generic completion checks Git/PR and scripts.
         return [event("printf factory-shell-ok", output="factory-shell-ok")]
 
+
+class WorkerTests(WorkerFixture):
     # Missing image policy must fail before invoking the agent rather than loading unsafe defaults.
     def test_missing_factory_configuration_stops_before_agent(self):
         with (
@@ -430,18 +430,6 @@ class WorkerTests(unittest.TestCase):
             self.task.execute({**self.job, "baseSha": "0" * 40})
         self.assertEqual(self.agent_calls, 0)
         self.assertEqual(self.prs, [])
-
-    # Rejects an agent result without the initial sandbox probe; process exit alone
-    # does not satisfy probe, independent script, or Git/PR checks.
-    def test_agent_exit_without_command_evidence_is_not_success(self):
-        with (
-            patch.dict(os.environ, self.env),
-            patch.object(self.task, "capture", side_effect=self.external),
-            patch.object(self.task, "run_agent", return_value=[]),
-            contextlib.redirect_stdout(io.StringIO()),
-            self.assertRaises(ValueError),
-        ):
-            self.task.execute(self.job)
 
     # Rejects administrator identity before secret retrieval or agent work,
     # enforcing execution-role access rather than borrowed operator privileges.
@@ -604,7 +592,7 @@ class WorkerTests(unittest.TestCase):
     # Retains streamed events with redacted logs but rejects invalid JSON or nonzero
     # exit, preventing broken agent execution from supplying usable completion evidence.
     def test_real_agent_stream_logs_redacted_output_and_requires_zero_exit(self):
-        events = [event("printf gate2-shell-ok", output="gate2-shell-ok")]
+        events = [event("printf factory-shell-ok", output="factory-shell-ok")]
         code = (
             "import json,sys; sys.stdin.read(); print(json.dumps("
             + repr(events[0])

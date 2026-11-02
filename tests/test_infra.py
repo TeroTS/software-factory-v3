@@ -248,30 +248,6 @@ class InfrastructureTests(unittest.TestCase):
             },
         )
 
-    # Ensures synthesized cleanup preserves workflow state after a termination
-    # request, so the VM ID remains available for confirming actual termination.
-    def test_synthesized_termination_retains_vm_id_for_confirmation(self):
-        resource = next(
-            iter(
-                self.workflow_template.find_resources(
-                    "AWS::StepFunctions::StateMachine"
-                ).values()
-            )
-        )
-        encoded = resource["Properties"]["DefinitionString"]
-        text = (
-            encoded
-            if isinstance(encoded, str)
-            else "".join(
-                piece if isinstance(piece, str) else "symbolic-value"
-                for piece in encoded["Fn::Join"][1]
-            )
-        )
-        deployed = json.loads(text)
-        self.assertEqual(
-            deployed["States"]["TerminateVM"].get("ResultPath"), "$.terminationRequest"
-        )
-
     # Requires an operator-supplied image pin and a non-auth-overriding connection,
     # while keeping orchestration permissions free of administrator/history access.
     def test_workflow_requires_explicit_pin_and_marker_only_connection(self):

@@ -83,7 +83,10 @@ def simulate(definition, replies, limit=100, job=None):
     context = {"Execution": {"Name": "same-execution"}}
     state = definition["StartAt"]
     calls, elapsed = [], 0
-    replies = {name: iter(items) for name, items in replies.items()}
+    replies = {
+        name: items if callable(items) else iter(items)
+        for name, items in replies.items()
+    }
     for _ in range(limit):
         step = definition["States"][state]
         kind = step["Type"]
@@ -111,7 +114,8 @@ def simulate(definition, replies, limit=100, job=None):
             if kind == "Task":
                 args = parameters(step["Parameters"], data, context)
                 calls.append((state, args))
-                result = next(replies[state])
+                reply = replies[state]
+                result = reply(args) if callable(reply) else next(reply)
                 if isinstance(result, Exception):
                     catch = step.get("Catch")
                     if not catch:
@@ -135,7 +139,7 @@ def simulate(definition, replies, limit=100, job=None):
     raise AssertionError("Simulation exceeded state budget")
 
 
-class WorkflowTests(unittest.TestCase):
+class WorkflowFixture(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
@@ -179,6 +183,8 @@ class WorkflowTests(unittest.TestCase):
             "GetTerminationState": [{"State": "TERMINATING"}, {"State": "TERMINATED"}],
         }
 
+
+class WorkflowTests(WorkflowFixture):
     def test_simplified_plan_uses_fresh_polls_and_shared_termination(self):
         states = self.definition["States"]
         self.assertEqual(self.definition["StartAt"], "Input")
@@ -200,6 +206,7 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(states[wait]["Next"], target)
         for outcome in ("RecordSuccess", "RecordFailure"):
             self.assertEqual(states[outcome]["Next"], "TerminateVM")
+        self.assertEqual(states["TerminateVM"]["ResultPath"], "$.terminationRequest")
         for name, operation in (
             ("LaunchVM", "runMicrovm"),
             ("GetVMState", "getMicrovm"),
