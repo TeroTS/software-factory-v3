@@ -2,6 +2,83 @@
 
 Status: done
 
+## Operator-approved follow-up: allow the PR target branch to advance
+
+- Request/approved plan: stop requiring the PR target head to equal the Job's
+  pinned baseline. `baseSha` still establishes task-commit ancestry; the PR must
+  still target the configured branch and match the verified local/remote task
+  head. Compatibility with the current target branch remains a merge-time check,
+  not a worker success guarantee.
+- Removed only PR `baseRefOid` equality, its `gh pr list --json` field, and the
+  unused `base` argument in `verify_pr()` and connected callers/fixtures.
+  Independent script verification, baseline ancestry, nonempty clean commits,
+  remote/task/PR head consistency, PR state/count, and target-branch identity
+  checks remain. No Job/status API, workflow, dependency, or GitHub policy change.
+- Updated `DECISIONS.md`, `SPEC.md`, and `docs/contracts.md` to distinguish a
+  pinned starting baseline from a moving target head. Existing uncommitted
+  worker-event-removal changes were preserved.
+- TDD: a regression advances the real local fixture's target branch while the
+  simulated agent publishes from the original baseline. It failed with the old
+  PR equality check, then passed after removal. A separate real Git test creates
+  a task commit without baseline ancestry and confirms rejection at
+  `git merge-base --is-ancestor`. Retained PR rejection cases cover wrong target,
+  task branch/head, closed/merged PRs, invalid PR numbers, and missing/duplicate
+  PRs; the shared fixture asserts `baseRefOid` is no longer requested from GitHub.
+- `uv run --locked python -m unittest discover -s tests -p test_worker.py -v`:
+  all 24 passed. The equivalent `test_job_outcomes.py` invocation: all five passed.
+  `make verify` passed formatting/lint, 62 discovered tests (59 passed, three
+  Docker-only skips), coverage, and logging. Overall and worker coverage remain
+  95%, with unchanged measurement scope (470 production statements, 17 missed).
+- `make preflight` passed the ARM64 image build, runtime validation, three real
+  sandbox/runtime/configuration checks, 24 worker/publication checks, and seven
+  lifecycle checks with external networking disabled and no host credentials.
+  `git diff --check` and changed-Markdown local-link/fence checks also passed.
+- No deployment, live AWS/GitHub Job, model call, publication, or merge-policy
+  changes were performed. Synthesis was not rerun for this follow-up because
+  infrastructure is unchanged; `make synth` remains available for a fresh local
+  asset/template. The locally built image is not a new deployed version pin.
+
+## Operator-approved follow-up: remove worker event handling
+
+- Request: remove worker-level agent event streaming and analysis. Scope is
+  `worker/task.py`, its fixture/regression tests, and the accepted invocation
+  requirements in `DECISIONS.md` and `SPEC.md`; no lifecycle/status API or
+  workflow change.
+- `run_agent()` runs one Codex process with the prompt on stdin, waits for exit,
+  logs redacted stdout/stderr and the actual process exit code, and propagates
+  nonzero exit. Removed `--json`, event parsing/collection, event-type failure
+  inference, and event-based initial sandbox-shell validation. The fixture no
+  longer fabricates events. Plain diagnostics and failure-shaped JSON do not
+  override a successful process exit; success-looking output cannot override a
+  nonzero exit.
+- Retained managed sandbox policy, image/runtime sandbox validation, the prompt's
+  initial shell check, one invocation, independent final verification, Git/PR
+  consistency checks, scoped credentials, and unchanged status polling/cleanup.
+  The worker no longer independently proves that the initial agent shell check
+  passed. Human review remains required.
+- Output redaction now also recognizes escaped credential-field delimiters:
+  removing event decoding initially exposed nested JSON credential values in a
+  regression test. The regression failed before the redaction fix and passed
+  afterward, without reintroducing event parsing.
+- TDD: updated worker tests failed against the old invocation/parser; after the
+  change, `uv run --locked python -m unittest discover -s tests -p test_worker.py -v`
+  passed all 22 tests. `make verify` passed formatting, lint, 60 discovered tests
+  (57 passed, three Docker-only skips), coverage, and logging. Overall and worker
+  coverage remain 95%; measured production statements dropped from 499 to 470
+  through deletion, with unchanged measurement scope.
+- `make preflight` passed the ARM64 image build, runtime validation, all three
+  real sandbox/configuration tests, 22 worker/publication tests, and seven
+  lifecycle tests with external networking disabled. No dependencies changed.
+- `make synth` passed without deployment; the existing Node 25/jsii compatibility
+  warning and CDK feature-flag notice remain (Node 22/24 is recommended).
+  `git diff --check` and changed-Markdown local-link/fence checks passed.
+- Operational limit: agent output is buffered in memory until process exit, not
+  available as live progress; forced termination can lose buffered diagnostics.
+  Image/runtime validation is not proof of the agent's initial shell check or
+  live model/publication behavior. No deployment, live AWS/GitHub Job, model call,
+  or publication was authorized or performed; a new deployed image still needs
+  separate authorization and validation.
+
 ## Slice Goal
 - Verify generic Job outcomes through worker execution, status polling, and confirmed cleanup while retaining focused security checks.
 

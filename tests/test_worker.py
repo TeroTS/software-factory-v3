@@ -13,27 +13,14 @@ import boto3
 from botocore.stub import Stubber
 
 
-def event(command, code=0, output=""):
-    return {
-        "type": "item.completed",
-        "item": {
-            "type": "command_execution",
-            "command": command,
-            "exit_code": code,
-            "aggregated_output": output,
-        },
-    }
-
-
 class PublicationTests(unittest.TestCase):
     def setUp(self):
         from worker import task
 
         self.task = task
 
-    # Requires exactly one open, unmerged PR matching the task commit, pinned base,
-    # and configured target, keeping published work available for human review.
-    def test_pr_must_match_branch_commit_baseline_and_be_open(self):
+    # Requires exactly one open, unmerged PR matching the task commit and configured target.
+    def test_pr_must_match_branch_commit_target_and_be_open(self):
         pr = {
             "number": 2,
             "state": "OPEN",
@@ -41,16 +28,14 @@ class PublicationTests(unittest.TestCase):
             "baseRefName": "release",
             "headRefName": "factory/task-test",
             "headRefOid": "b" * 40,
-            "baseRefOid": "a" * 40,
         }
-        self.task.verify_pr([pr], "factory/task-test", "b" * 40, "a" * 40, "release")
+        self.task.verify_pr([pr], "factory/task-test", "b" * 40, "release")
         for changes in (
             {"state": "CLOSED"},
             {"mergedAt": "now"},
             {"headRefName": "wrong"},
             {"headRefOid": "wrong"},
             {"baseRefName": "main"},
-            {"baseRefOid": "wrong"},
             {"number": 0},
             {"number": -1},
             {"number": "2"},
@@ -60,14 +45,11 @@ class PublicationTests(unittest.TestCase):
                     [{**pr, **changes}],
                     "factory/task-test",
                     "b" * 40,
-                    "a" * 40,
                     "release",
                 )
         for prs in ([], [pr, pr], [{}]):
             with self.subTest(prs=prs), self.assertRaises(ValueError):
-                self.task.verify_pr(
-                    prs, "factory/task-test", "b" * 40, "a" * 40, "release"
-                )
+                self.task.verify_pr(prs, "factory/task-test", "b" * 40, "release")
 
 
 class WorkerFixture(unittest.TestCase):
@@ -223,6 +205,7 @@ class WorkerFixture(unittest.TestCase):
         if args[:2] == ["gh", "auth"]:
             return ""
         if args[:3] == ["gh", "pr", "list"]:
+            self.assertNotIn("baseRefOid", args[args.index("--json") + 1].split(","))
             return json.dumps(self.prs)
         if args[:2] == ["codex", "--version"]:
             return "codex-cli 0.166.0"
@@ -245,7 +228,6 @@ class WorkerFixture(unittest.TestCase):
             [
                 "codex",
                 "exec",
-                "--json",
                 "--ephemeral",
                 "-C",
                 str(cwd),
@@ -279,11 +261,8 @@ class WorkerFixture(unittest.TestCase):
                 "baseRefName": "release",
                 "headRefName": branch,
                 "headRefOid": head,
-                "baseRefOid": self.sha,
             }
         ]
-        # Chronology is deliberately not supplied: generic completion checks Git/PR and scripts.
-        return [event("printf factory-shell-ok", output="factory-shell-ok")]
 
 
 class WorkerTests(WorkerFixture):
@@ -563,6 +542,53 @@ class WorkerTests(WorkerFixture):
             ):
                 self.task.execute(self.job)
 
+    # Advancing the real target branch must not invalidate work descended from the pinned baseline.
+    def test_target_branch_can_advance_during_agent_work(self):
+        def agent(*args):
+            self.agent(*args)
+            (self.origin / "target-only.txt").write_text("another change\n")
+            self.git("add", ".")
+            self.git("commit", "-m", "advance target")
+            target_head = self.git("rev-parse", "release").strip()
+            self.assertNotEqual(target_head, self.sha)
+            self.prs[0]["baseRefOid"] = target_head
+
+        with (
+            patch.object(self.task, "capture", side_effect=self.external),
+            patch.object(self.task, "run_agent", side_effect=agent),
+            contextlib.redirect_stdout(io.StringIO()) as logs,
+        ):
+            self.task.execute(self.job)
+        self.assertEqual(self.agent_calls, 1)
+        self.assertIn("Verified repository script", logs.getvalue())
+
+    # Reject a task whose final commit does not descend from the pinned baseline.
+    def test_completion_requires_pinned_baseline_ancestry(self):
+        def agent(*args):
+            self.agent(*args)
+            repository, env = args[2:4]
+            tree = self.external(
+                ["git", "rev-parse", "HEAD^{tree}"], repository, env
+            ).strip()
+            orphan = subprocess.check_output(
+                ["git", "commit-tree", tree, "-m", "unrelated task"],
+                cwd=repository,
+                env=env,
+                text=True,
+            ).strip()
+            self.external(["git", "update-ref", "HEAD", orphan], repository, env)
+
+        with (
+            patch.object(self.task, "capture", side_effect=self.external),
+            patch.object(self.task, "run_agent", side_effect=agent),
+            contextlib.redirect_stdout(io.StringIO()),
+            self.assertRaises(subprocess.CalledProcessError) as failure,
+        ):
+            self.task.execute(self.job)
+        self.assertEqual(
+            failure.exception.cmd[:3], ["git", "merge-base", "--is-ancestor"]
+        )
+
     # Removes both supplied secrets and newly seen AWS credential fields,
     # protecting logs when execution-role credentials rotate during a job.
     def test_redactor_handles_known_and_rotated_credentials(self):
@@ -589,14 +615,13 @@ class WorkerTests(WorkerFixture):
         self.assertIn("test-output [REDACTED]\n", output.getvalue())
         self.assertNotIn("test-private-value", output.getvalue())
 
-    # Retains streamed events with redacted logs but rejects invalid JSON or nonzero
-    # exit, preventing broken agent execution from supplying usable completion evidence.
-    def test_real_agent_stream_logs_redacted_output_and_requires_zero_exit(self):
-        events = [event("printf factory-shell-ok", output="factory-shell-ok")]
+    # Treat output as opaque diagnostics, not events; retain sanitized stdout/stderr after exit.
+    def test_agent_output_is_not_interpreted_and_is_redacted(self):
         code = (
-            "import json,sys; sys.stdin.read(); print(json.dumps("
-            + repr(events[0])
-            + ')); print(json.dumps({"type":"item.completed","item":{"type":"command_execution","aggregated_output":"session-token"}}))'
+            'import sys; assert sys.stdin.read() == "prompt"; '
+            'print("plain output session-token"); '
+            'print(\'{"type":"turn.failed"}\'); '
+            'print("diagnostic SecretAccessKey=rotated-private-value", file=sys.stderr)'
         )
         with contextlib.redirect_stdout(io.StringIO()) as logs:
             result = self.task.run_agent(
@@ -606,43 +631,46 @@ class WorkerTests(WorkerFixture):
                 self.env,
                 ["session-token"],
             )
-        self.assertEqual(len(result), 2)
+        self.assertIsNone(result)
+        self.assertIn("plain output [REDACTED]", logs.getvalue())
+        self.assertIn('{"type":"turn.failed"}', logs.getvalue())
+        self.assertIn("diagnostic SecretAccessKey=[REDACTED]", logs.getvalue())
+        self.assertIn("actual exit code 0", logs.getvalue())
         self.assertNotIn("session-token", logs.getvalue())
-        for code in (
-            "import sys; sys.stdin.read(); sys.exit(1)",
-            'import sys; sys.stdin.read(); print("bad-json")',
-            'import sys; sys.stdin.read(); print(\'{"type":"turn.failed","error":"session-token"}\')',
-        ):
-            with (
-                contextlib.redirect_stdout(io.StringIO()),
-                self.assertRaises(ValueError),
-            ):
-                self.task.run_agent(
-                    [os.sys.executable, "-c", code], "prompt", self.root, self.env, []
-                )
+        self.assertNotIn("rotated-private-value", logs.getvalue())
 
-    # Redacts newly seen AWS secrets inside JSON-encoded error messages,
-    # protecting logs even when credential details arrive nested in agent output.
-    def test_rotated_credentials_in_nested_agent_error_are_redacted(self):
-        error = {
-            "type": "error",
-            "message": json.dumps(
-                {
-                    "SecretAccessKey": "rotated-private-value",
-                    "SessionToken": "rotated-session-value",
-                }
-            ),
-        }
-        code = "import sys; sys.stdin.read(); print(" + repr(json.dumps(error)) + ")"
-        with (
-            contextlib.redirect_stdout(io.StringIO()) as logs,
-            self.assertRaises(ValueError),
-        ):
+    # Opaque output can still contain nested credential fields; redaction must not require event parsing.
+    def test_nested_credentials_in_agent_diagnostics_are_redacted(self):
+        output = json.dumps(
+            {"message": json.dumps({"SessionToken": "rotated-private-value"})}
+        )
+        code = "import sys; sys.stdin.read(); print(" + repr(output) + ")"
+        with contextlib.redirect_stdout(io.StringIO()) as logs:
             self.task.run_agent(
                 [os.sys.executable, "-c", code], "prompt", self.root, self.env, []
             )
         self.assertNotIn("rotated-private-value", logs.getvalue())
-        self.assertNotIn("rotated-session-value", logs.getvalue())
+
+    # A nonzero process exit fails even with success-looking output, preserving actual exit diagnostics.
+    def test_agent_process_failure_logs_redacted_output_and_propagates_exit(self):
+        code = (
+            'import sys; sys.stdin.read(); print(\'{"type":"turn.completed"}\'); '
+            'print("session-token", file=sys.stderr); sys.exit(7)'
+        )
+        with (
+            contextlib.redirect_stdout(io.StringIO()) as logs,
+            self.assertRaises(subprocess.CalledProcessError) as failure,
+        ):
+            self.task.run_agent(
+                [os.sys.executable, "-c", code],
+                "prompt",
+                self.root,
+                self.env,
+                ["session-token"],
+            )
+        self.assertEqual(failure.exception.returncode, 7)
+        self.assertIn("actual exit code 7", logs.getvalue())
+        self.assertNotIn("session-token", logs.getvalue())
 
     def test_scripts_fail_before_agent_for_missing_nonexecutable_and_nonzero(self):
         for index, (script, failure) in enumerate(
@@ -737,20 +765,6 @@ class WorkerTests(WorkerFixture):
                 logs.getvalue(),
             )
             self.assertEqual(len(self.prs), 1)
-
-    def test_sandbox_probe_failure_stops_before_completion(self):
-        for events in (
-            [],
-            [event("printf factory-shell-ok", 1, "factory-shell-ok")],
-            [event("echo other", output="other")],
-        ):
-            with (
-                self.subTest(events=events),
-                patch.object(self.task, "capture", side_effect=self.external),
-                patch.object(self.task, "run_agent", return_value=events),
-                self.assertRaisesRegex(ValueError, "Initial sandbox shell"),
-            ):
-                self.task.invoke_agent(self.job, self.origin, "branch", self.env, [])
 
     def test_invalid_target_branch_stops_before_scripts_or_agent(self):
         with (

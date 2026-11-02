@@ -159,7 +159,6 @@ class JobOutcomeTests(test_worker.WorkerFixture, test_workflow.WorkflowFixture):
                 publication["prs"],
                 pr["headRefName"],
                 self.git("rev-parse", pr["headRefName"]).strip(),
-                self.sha,
                 "release",
             )
             self.assertIn("Verified repository script", logs.read_text())

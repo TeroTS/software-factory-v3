@@ -42,7 +42,7 @@ def redact(text, secrets):
         if secret:
             text = text.replace(secret, "[REDACTED]")
     text = re.sub(
-        r'(?i)(["\']?(?:AccessKeyId|SecretAccessKey|SessionToken|AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN|GH_TOKEN|GITHUB_TOKEN)["\']?\s*[:=]\s*)["\']?[^\s,"\'}]+["\']?',
+        r'(?i)([\\"\']*(?:AccessKeyId|SecretAccessKey|SessionToken|AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN|GH_TOKEN|GITHUB_TOKEN)[\\"\']*\s*[:=]\s*)[\\"\']*[^\s,"\'\\}]+[\\"\']*',
         r"\1[REDACTED]",
         text,
     )
@@ -108,60 +108,20 @@ def credentials(env, secrets):
     return values["AccessKeyId"]
 
 
-# Stream exactly one Codex invocation; malformed JSON/process failure cannot produce success.
+# Run one Codex process with stdin prompt; log redacted diagnostics after exit and propagate failure.
 def run_agent(args, prompt, cwd, env, secrets):
-    process = subprocess.Popen(
+    result = subprocess.run(
         args,
         cwd=cwd,
         env=env,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
+        input=prompt,
         text=True,
+        capture_output=True,
+        check=False,
     )
-    process.stdin.write(prompt)
-    process.stdin.close()
-    events = []
-    malformed = False
-    failed = False
-    for line in process.stdout:
-        try:
-            event = json.loads(line)
-            if not isinstance(event, dict):
-                raise TypeError("Invalid agent event")
-        except (ValueError, UnicodeError, TypeError):
-            malformed = True
-            print("Non-JSON Codex diagnostic: " + redact(line, secrets), flush=True)
-            continue
-        events.append(event)
-        item = event.get("item", {})
-        if item.get("type") == "command_execution":
-            print(
-                redact(
-                    item.get("command", "") + "\n" + item.get("aggregated_output", ""),
-                    secrets,
-                ),
-                flush=True,
-            )
-            if "exit_code" in item:
-                print(
-                    "Agent command actual exit code " + str(item["exit_code"]),
-                    flush=True,
-                )
-        if event.get("type") in ("error", "turn.failed"):
-            failed = True
-            print(
-                redact(
-                    str(event.get("message", event.get("error", "Agent turn failed"))),
-                    secrets,
-                ),
-                flush=True,
-            )
-    process.stdout.close()
-    code = process.wait()
-    if code != 0 or malformed or failed:
-        raise ValueError("Codex process or event stream failed")
-    return events
+    print(redact(result.stdout + result.stderr, secrets), flush=True)
+    print("Agent process actual exit code " + str(result.returncode), flush=True)
+    result.check_returncode()
 
 
 # Give one agent the approved task, script contract, sandbox probe, and configured publication target.
@@ -254,7 +214,7 @@ def prepare_repository(job, env, secrets):
     return repository, branch
 
 
-# Enforce the pinned Codex invocation for this Job/branch; return streamed events or propagate failure.
+# Enforce the pinned Codex invocation for this Job/branch; propagate process failure.
 def invoke_agent(job, repository, branch, env, secrets):
     version = capture(["codex", "--version"], repository, env).strip()
     if version != "codex-cli 0.166.0":
@@ -264,7 +224,6 @@ def invoke_agent(job, repository, branch, env, secrets):
     args = [
         "codex",
         "exec",
-        "--json",
         "--ephemeral",
         "-C",
         str(repository),
@@ -272,26 +231,13 @@ def invoke_agent(job, repository, branch, env, secrets):
         str(repository / ".git"),
         "-",
     ]
-    events = run_agent(
+    run_agent(
         args, prompt_for(job, branch, env["PR_TARGET_BRANCH"]), repository, env, secrets
     )
-    commands = [
-        event["item"]
-        for event in events
-        if event.get("type") == "item.completed"
-        and event.get("item", {}).get("type") == "command_execution"
-    ]
-    if (
-        not commands
-        or commands[0].get("exit_code") != 0
-        or "factory-shell-ok" not in commands[0].get("aggregated_output", "")
-    ):
-        raise ValueError("Initial sandbox shell did not pass")
-    return events
 
 
-# Check one open, unmerged PR against verified Git branch/head, pinned base, and configured target.
-def verify_pr(prs, branch, head, base, target):
+# Check one open, unmerged PR against verified task branch/head and configured target, which may advance.
+def verify_pr(prs, branch, head, target):
     if len(prs) != 1:
         raise ValueError("Expected exactly one PR on task branch")
     pr = prs[0]
@@ -301,7 +247,6 @@ def verify_pr(prs, branch, head, base, target):
         "baseRefName": target,
         "headRefName": branch,
         "headRefOid": head,
-        "baseRefOid": base,
     }
     if (
         not isinstance(pr.get("number"), int)
@@ -358,13 +303,13 @@ def verify_completion(job, repository, branch, env, secrets):
                 "--state",
                 "all",
                 "--json",
-                "number,state,mergedAt,baseRefName,headRefName,headRefOid,baseRefOid",
+                "number,state,mergedAt,baseRefName,headRefName,headRefOid",
             ],
             repository,
             env,
         )
     )
-    verify_pr(prs, branch, head, job["baseSha"], env["PR_TARGET_BRANCH"])
+    verify_pr(prs, branch, head, env["PR_TARGET_BRANCH"])
 
 
 # Validate and coordinate one Job's stages; require final scoped credentials before successful exit.

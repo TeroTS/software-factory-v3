@@ -422,8 +422,13 @@ Acceptance criteria:
 - Move model/provider, sandbox mode/network access, web search, approval, and
   shell environment policies into factory-owned configuration while retaining
   accepted values and excluding secret values.
-- Keep `exec`, `--json`, `--ephemeral`, repository path, `.git` access, and stdin
-  prompt input in Python as invocation-specific arguments.
+- Keep `exec`, `--ephemeral`, repository path, `.git` access, and stdin
+  prompt input in Python as invocation-specific arguments. The operator-approved
+  event-removal follow-up supersedes the earlier `--json` requirement: wait for
+  process exit, log redacted diagnostics afterward, and propagate nonzero exit
+  without collecting or analyzing events or validating the initial shell check
+  from command events. Retain managed sandbox policy, image/runtime sandbox
+  validation, the prompt's initial shell check, and independent completion checks.
 - Verify loading and precedence with the pinned Codex version before choosing
   the location. Repository configuration must not override approved constraints;
   retain explicit enforcement where configuration alone is insufficient.
@@ -468,6 +473,11 @@ Acceptance criteria:
   nonempty committed changes, baseline ancestry, clean workspace, matching remote
   head, and one open unmerged PR. Do not restart the agent, rerun the whole task,
   merge a PR, or publish directly to the configured target branch.
+- The configured PR target branch may advance during a Job. Require task-commit
+  ancestry from pinned `baseSha` and matching local/remote/PR task heads, not
+  equality between the PR target head (`baseRefOid`) and `baseSha`. Worker success
+  does not prove compatibility with the current target branch; that remains a
+  merge-time check. Do not change GitHub merge policy as part of this follow-up.
 - Coordinate removal of demonstration-specific evidence with US-12. Do not claim
   automated proof of verification-before-publication after chronology validation
   is removed; manual GitHub review judges change correctness and test adequacy.
