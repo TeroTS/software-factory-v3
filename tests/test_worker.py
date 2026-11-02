@@ -1,5 +1,4 @@
 import contextlib
-import importlib
 import io
 import json
 import os
@@ -54,9 +53,6 @@ class PublicationTests(unittest.TestCase):
 
 class WorkerFixture(unittest.TestCase):
     def setUp(self, origin=None, workspace=None):
-        self.assertIsNotNone(
-            importlib.util.find_spec("worker.task"), "Replacement worker missing"
-        )
         from worker import task
 
         self.task = task
@@ -280,73 +276,30 @@ class WorkerTests(WorkerFixture):
     # Exercises real local checkout, tests, and Git with simulated external services,
     # checking one agent invocation, one PR, and secret-free passing-test logs.
     def test_real_checkout_tests_git_and_simulated_agent_publication(self):
-        stages = (
-            "prepare_environment",
-            "prepare_repository",
-            "invoke_agent",
-            "verify_completion",
-        )
-        for name in stages:
-            self.assertTrue(hasattr(self.task, name), "Worker stage missing: " + name)
         calls = []
-        results = {}
 
-        def observe(name, function):
-            def run(*args):
-                calls.append((name, args))
-                result = function(*args)
-                results[name] = result
-                return result
+        def capture(args, cwd, env, secrets=None):
+            calls.append(args[0])
+            return self.external(args, cwd, env, secrets)
 
-            return run
+        def agent(*args):
+            calls.append("agent")
+            return self.agent(*args)
 
-        with contextlib.ExitStack() as stack:
-            for name in (*stages, "credentials"):
-                stack.enter_context(
-                    patch.object(
-                        self.task,
-                        name,
-                        side_effect=observe(name, getattr(self.task, name)),
-                    )
-                )
-            self.run_staged_job(calls, results)
-
-    def run_staged_job(self, calls, results):
         with (
-            patch.dict(os.environ, self.env),
-            patch.object(self.task, "capture", side_effect=self.external),
-            patch.object(self.task, "run_agent", side_effect=self.agent),
+            patch.object(self.task, "capture", side_effect=capture),
+            patch.object(self.task, "run_agent", side_effect=agent),
             contextlib.redirect_stdout(io.StringIO()) as logs,
         ):
             self.task.execute(self.job)
         self.assertEqual(
-            [name for name, _ in calls],
             [
-                "prepare_environment",
-                "credentials",
-                "prepare_repository",
-                "invoke_agent",
-                "verify_completion",
-                "credentials",
+                call
+                for call in calls
+                if call in ("./scripts/setup", "./scripts/verify", "agent")
             ],
+            ["./scripts/setup", "./scripts/verify", "agent", "./scripts/verify"],
         )
-        env, initial_access = results["prepare_environment"]
-        repository, branch = results["prepare_repository"]
-        secrets = calls[0][1][0]
-        self.assertEqual(initial_access, "ASIA" + "X" * 16)
-        self.assertEqual(calls[2][1], (self.job, env, secrets))
-        self.assertEqual(calls[3][1], (self.job, repository, branch, env, secrets))
-        self.assertEqual(
-            calls[4][1],
-            (
-                self.job,
-                repository,
-                branch,
-                env,
-                secrets,
-            ),
-        )
-        self.assertEqual(calls[5][1], (env, secrets))
         self.assertEqual(self.agent_calls, 1)
         self.assertEqual(len(self.prs), 1)
         for stubber in self.stubbers.values():
@@ -364,8 +317,6 @@ class WorkerTests(WorkerFixture):
             "verify_completion",
             "credentials",
         )
-        for name in stages:
-            self.assertTrue(hasattr(self.task, name), "Worker stage missing: " + name)
         for failed in stages:
             calls = []
 
@@ -589,19 +540,6 @@ class WorkerTests(WorkerFixture):
             failure.exception.cmd[:3], ["git", "merge-base", "--is-ancestor"]
         )
 
-    # Removes both supplied secrets and newly seen AWS credential fields,
-    # protecting logs when execution-role credentials rotate during a job.
-    def test_redactor_handles_known_and_rotated_credentials(self):
-        text = 'github_pat_synthetic_token {"SecretAccessKey":"rotated-secret","SessionToken":"rotated-session","AccessKeyId":"ASIAXXXXXXXXXXXXXXXX"}'
-        cleaned = self.task.redact(text, ["github_pat_synthetic_token"])
-        for value in (
-            "github_pat_synthetic_token",
-            "rotated-secret",
-            "rotated-session",
-            "ASIAXXXXXXXXXXXXXXXX",
-        ):
-            self.assertNotIn(value, cleaned)
-
     # Keeps successful command stderr visible while redacting secrets, preserving
     # test diagnostics without violating the no-credentials-in-logs rule.
     def test_successful_test_stderr_is_retained_without_secrets(self):
@@ -617,10 +555,15 @@ class WorkerTests(WorkerFixture):
 
     # Treat output as opaque diagnostics, not events; retain sanitized stdout/stderr after exit.
     def test_agent_output_is_not_interpreted_and_is_redacted(self):
+        credentials = 'github_pat_synthetic_token {"SecretAccessKey":"rotated-secret","SessionToken":"rotated-session","AccessKeyId":"ASIAXXXXXXXXXXXXXXXX"}'
+        nested = json.dumps(
+            {"message": json.dumps({"SessionToken": "nested-private-value"})}
+        )
         code = (
             'import sys; assert sys.stdin.read() == "prompt"; '
             'print("plain output session-token"); '
             'print(\'{"type":"turn.failed"}\'); '
+            f"print({credentials!r}); print({nested!r}); "
             'print("diagnostic SecretAccessKey=rotated-private-value", file=sys.stderr)'
         )
         with contextlib.redirect_stdout(io.StringIO()) as logs:
@@ -629,27 +572,24 @@ class WorkerTests(WorkerFixture):
                 "prompt",
                 self.root,
                 self.env,
-                ["session-token"],
+                ["session-token", "github_pat_synthetic_token"],
             )
         self.assertIsNone(result)
         self.assertIn("plain output [REDACTED]", logs.getvalue())
         self.assertIn('{"type":"turn.failed"}', logs.getvalue())
         self.assertIn("diagnostic SecretAccessKey=[REDACTED]", logs.getvalue())
         self.assertIn("actual exit code 0", logs.getvalue())
-        self.assertNotIn("session-token", logs.getvalue())
-        self.assertNotIn("rotated-private-value", logs.getvalue())
-
-    # Opaque output can still contain nested credential fields; redaction must not require event parsing.
-    def test_nested_credentials_in_agent_diagnostics_are_redacted(self):
-        output = json.dumps(
-            {"message": json.dumps({"SessionToken": "rotated-private-value"})}
-        )
-        code = "import sys; sys.stdin.read(); print(" + repr(output) + ")"
-        with contextlib.redirect_stdout(io.StringIO()) as logs:
-            self.task.run_agent(
-                [os.sys.executable, "-c", code], "prompt", self.root, self.env, []
-            )
-        self.assertNotIn("rotated-private-value", logs.getvalue())
+        for value in (
+            "session-token",
+            "github_pat_synthetic_token",
+            "rotated-private-value",
+            "rotated-secret",
+            "rotated-session",
+            "ASIAXXXXXXXXXXXXXXXX",
+            "nested-private-value",
+        ):
+            with self.subTest(secret=value):
+                self.assertNotIn(value, logs.getvalue())
 
     # A nonzero process exit fails even with success-looking output, preserving actual exit diagnostics.
     def test_agent_process_failure_logs_redacted_output_and_propagates_exit(self):
@@ -720,24 +660,7 @@ class WorkerTests(WorkerFixture):
             path.chmod(0o755)
 
     def test_final_verification_failure_rejects_published_work(self):
-        def agent(*args):
-            result = self.agent(*args)
-            repository = args[2]
-            (repository / "greeting.txt").write_text("")
-            return result
-
-        with (
-            patch.object(self.task, "capture", side_effect=self.external),
-            patch.object(self.task, "run_agent", side_effect=agent),
-            contextlib.redirect_stdout(io.StringIO()),
-            self.assertRaises(subprocess.CalledProcessError),
-        ):
-            self.task.execute(self.job)
-        self.assertEqual(self.agent_calls, 1)
-        self.assertEqual(len(self.prs), 1)
-
-    def test_final_script_unavailable_rejects_published_work(self):
-        for index, failure in enumerate(("missing", "nonexecutable")):
+        for index, failure in enumerate(("missing", "nonexecutable", "nonzero")):
             self.sdk()
 
             def agent(*args, failure=failure):
@@ -745,8 +668,10 @@ class WorkerTests(WorkerFixture):
                 script = args[2] / "scripts/verify"
                 if failure == "missing":
                     script.unlink()
-                else:
+                elif failure == "nonexecutable":
                     script.chmod(0o644)
+                else:
+                    (args[2] / "greeting.txt").write_text("")
                 return result
 
             with (
@@ -757,13 +682,22 @@ class WorkerTests(WorkerFixture):
                 patch.object(self.task, "capture", side_effect=self.external),
                 patch.object(self.task, "run_agent", side_effect=agent),
                 contextlib.redirect_stdout(io.StringIO()) as logs,
-                self.assertRaisesRegex(ValueError, "Missing or non-executable"),
+                self.assertRaises(
+                    subprocess.CalledProcessError
+                    if failure == "nonzero"
+                    else ValueError
+                ) as error,
             ):
                 self.task.execute(self.job)
-            self.assertIn(
-                "Missing or non-executable repository script: ./scripts/verify",
-                logs.getvalue(),
-            )
+            if failure == "nonzero":
+                self.assertEqual(error.exception.returncode, 1)
+            else:
+                self.assertIn("Missing or non-executable", str(error.exception))
+                self.assertIn(
+                    "Missing or non-executable repository script: ./scripts/verify",
+                    logs.getvalue(),
+                )
+            self.assertEqual(self.agent_calls, index + 1)
             self.assertEqual(len(self.prs), 1)
 
     def test_invalid_target_branch_stops_before_scripts_or_agent(self):
@@ -784,43 +718,6 @@ class WorkerTests(WorkerFixture):
         ):
             self.task.execute({**self.job, "repository": "example/other"})
         prepare.assert_not_called()
-
-    def test_script_order_and_independent_verification(self):
-        calls = []
-
-        def capture(args, cwd, env, secrets=None):
-            calls.append(args[0])
-            return self.external(args, cwd, env, secrets)
-
-        def agent(*args):
-            calls.append("agent")
-            return self.agent(*args)
-
-        with (
-            patch.object(self.task, "capture", side_effect=capture),
-            patch.object(self.task, "run_agent", side_effect=agent),
-            contextlib.redirect_stdout(io.StringIO()),
-        ):
-            self.task.execute(self.job)
-        self.assertEqual(
-            [
-                call
-                for call in calls
-                if call in ("./scripts/setup", "./scripts/verify", "agent")
-            ],
-            ["./scripts/setup", "./scripts/verify", "agent", "./scripts/verify"],
-        )
-
-    # Converts execution failure to a nonzero exit without printing its secret-bearing
-    # exception, allowing lifecycle error reporting without credential disclosure.
-    def test_main_failure_logs_no_secret_and_exits_nonzero(self):
-        with (
-            patch.object(self.task, "execute", side_effect=ValueError("secret-value")),
-            patch("sys.stdin", io.StringIO(json.dumps(self.job))),
-            contextlib.redirect_stdout(io.StringIO()) as logs,
-        ):
-            self.assertEqual(self.task.main(), 1)
-        self.assertNotIn("secret-value", logs.getvalue())
 
 
 if __name__ == "__main__":

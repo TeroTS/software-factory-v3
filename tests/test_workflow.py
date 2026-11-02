@@ -63,10 +63,6 @@ def choice(rule, data, context):
         return isinstance(value, str) == rule["IsString"]
     if "IsNumeric" in rule:
         return (type(value) in (int, float)) == rule["IsNumeric"]
-    if "StringMatches" in rule:
-        # ASL supports only '*' as wildcard; shell '?' globs are literal here.
-        pattern = re.escape(rule["StringMatches"]).replace(r"\*", ".*")
-        return isinstance(value, str) and re.fullmatch(pattern, value) is not None
     return value == rule.get("StringEquals", rule.get("NumericEquals"))
 
 
@@ -225,20 +221,6 @@ class WorkflowTests(WorkflowFixture):
                 )
         self.assertEqual(self.definition["TimeoutSeconds"], 1680)
         self.assertEqual(states["PollWorker"]["TimeoutSeconds"], 10)
-
-    def test_known_vm_string_guard_matches_actual_asl_not_shell_globs(self):
-        rule = self.definition["States"]["CheckLaunch"]["Choices"][0]
-        self.assertTrue(choice(rule, {"vm": {"MicrovmId": "microvm-real"}}, {}))
-        for value in ("", None, 1):
-            self.assertFalse(choice(rule, {"vm": {"MicrovmId": value}}, {}))
-        self.assertFalse(choice(rule, {"vm": {}}, {}))
-        self.assertFalse(
-            choice(
-                {"Variable": "$.value", "StringMatches": "?*"},
-                {"value": "microvm-real"},
-                {},
-            )
-        )
 
     def test_success_reuses_one_token_and_confirms_cleanup(self):
         kind, output, calls, final = simulate(self.definition, self.replies)

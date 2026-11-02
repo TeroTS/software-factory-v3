@@ -1,5 +1,4 @@
 import contextlib
-import importlib
 import io
 import json
 import tempfile
@@ -10,10 +9,6 @@ from unittest.mock import patch
 
 class ImagePinTests(unittest.TestCase):
     def setUp(self):
-        self.assertIsNotNone(
-            importlib.util.find_spec("tools.verify_image"),
-            "Image pin verification missing",
-        )
         from tools.verify_image import verify
 
         self.verify = verify

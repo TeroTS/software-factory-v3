@@ -1,4 +1,3 @@
-import importlib
 import json
 import tempfile
 import unittest
@@ -13,9 +12,6 @@ from aws_cdk.assertions import Match, Template
 
 class InfrastructureTests(unittest.TestCase):
     def setUp(self):
-        self.assertIsNotNone(
-            importlib.util.find_spec("infra.stacks"), "Native CDK stacks missing"
-        )
         from infra.stacks import Artifacts, Image, Workflow
 
         self.directory = tempfile.TemporaryDirectory()
@@ -159,12 +155,10 @@ class InfrastructureTests(unittest.TestCase):
             },
         )
         root = Path(__file__).resolve().parents[1]
-        self.assertTrue((staged / "image/managed_config.toml").is_file())
         self.assertEqual(
             (staged / "image/managed_config.toml").read_bytes(),
             (root / "image/managed_config.toml").read_bytes(),
         )
-        self.assertTrue((staged / "image/requirements.txt").is_file())
         self.assertEqual(
             (staged / "image/requirements.txt").read_bytes(),
             (root / "image/requirements.txt").read_bytes(),
@@ -275,10 +269,6 @@ class InfrastructureTests(unittest.TestCase):
         )
         text = json.dumps(template)
         for action in (
-            "lambda:RunMicrovm",
-            "lambda:GetMicrovm",
-            "lambda:CreateMicrovmAuthToken",
-            "lambda:TerminateMicrovm",
             "iam:PassRole",
             "events:RetrieveConnectionCredentials",
             "states:InvokeHTTPEndpoint",

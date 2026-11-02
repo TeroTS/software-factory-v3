@@ -257,6 +257,67 @@ A successful request is not confirmation; retain the ID and report unresolved cl
 - A separate read-only checkout of the exact published head passed `./scripts/setup && ./scripts/verify` in the credential-free, network-disabled ARM64 preflight image: Python 3.13.16 and all six tests, exit 0. Existing PR #1/#2/#3 states and heads remain unchanged and all PRs are unmerged; there is exactly one new PR. Secret version-stage metadata remains unchanged/not scheduled for deletion, with no operator GetSecretValue call.
 - Final `make verify` passed format/lint/logging and all 60 discovered tests (57 passed, three Docker-only skips); coverage remains 95%, scope unchanged. Earlier `make preflight`, synthesis, AWS ASL validation and exact-source image-pin checks passed as recorded above. This establishes the requested current-source live happy path only; US-05 controlled failure and US-06 automatic hard-lifespan demonstrations were not run. No further Job is authorized.
 
+### Operator-requested whole-suite cleanup
+
+- Reviewed all nine discovered test modules and `tests/worker_process.py` against
+  their assertions, production callers, Make/preflight entry points, and accepted
+  behavior. Changed only five test modules and this note; production code,
+  dependencies, coverage configuration, and the existing revalidation note above
+  are unchanged. Retained all five joined Job outcomes and focused credential,
+  authorization, sandbox, lifecycle, Git/PR, cleanup and timeout checks.
+- Seven test methods were removed or folded into retained behavioral checks:
+  - `test_script_order_and_independent_verification`: folded its exact
+    setup → baseline verify → agent → independent verify assertion into
+    `test_real_checkout_tests_git_and_simulated_agent_publication`, avoiding a
+    second successful checkout/publication. Removed `run_staged_job()` and its
+    stage argument/return observation scaffolding; actual Git/publication,
+    secret-free logs, one invocation, consumed SDK responses and stage-failure
+    ordering assertions remain.
+  - `test_redactor_handles_known_and_rotated_credentials` and
+    `test_nested_credentials_in_agent_diagnostics_are_redacted`: folded all
+    supplied, rotated and escaped/nested credential values into
+    `test_agent_output_is_not_interpreted_and_is_redacted`. One real subprocess
+    now checks these together with visible sanitized stdout/stderr and opaque
+    failure-shaped JSON. Nonzero agent exit retains its separate regression.
+  - `test_final_script_unavailable_rejects_published_work`: combined missing,
+    non-executable and nonzero final verification into subtests in
+    `test_final_verification_failure_rejects_published_work`; retained explicit
+    failure types, diagnostics, one agent per scenario and existing publication.
+  - `test_main_failure_logs_no_secret_and_exits_nonzero`: duplicates the retained
+    five-stage failure matrix, which already invokes `main()`, asserts exit 1,
+    hides the same secret-bearing exception, and prevents later-stage execution.
+  - `test_known_vm_string_guard_matches_actual_asl_not_shell_globs`: valid and
+    missing/empty/null/numeric VM IDs are already exercised through full workflow
+    transitions. Removed its simulator-only glob assertion and unused
+    `StringMatches` implementation; current synthesized ASL uses no glob choice.
+  - `test_image_excludes_obsolete_calculator_acceptance`: only checked the
+    absence of deleted files/references, not active behavior. Exact staged-file
+    checks and real image/runtime/sandbox checks remain.
+- Removed redundant import-discovery assertions/imports, file-existence checks
+  immediately followed by byte reads, and duplicated workflow permission-name
+  assertions already covered by exact scoped IAM statements. Removed assertions
+  forbidding hash flags: those enforce no accepted requirement. Runtime dependency
+  pins, lockfile agreement and exclusion of development dependencies remain.
+- Baseline `make coverage`: 62 tests, three host skips, 44.787 seconds.
+  Focused worker command (`uv run --locked python -m unittest discover -s tests
+  -p test_worker.py -v`) passed all 19 remaining worker/publication checks.
+  Final `make verify` passed formatting, lint, logging and 55 discovered tests
+  (52 passed, three Docker-only skips; 41.988 seconds). The initial format check
+  found one wrapped assertion; corrected it before the passing full run. Timings
+  are single observations, not a controlled performance benchmark.
+- Coverage JSON comparison confirms identical per-file executed/missing lines
+  and branches, source scope and totals: 95% combined coverage, 470 statements,
+  17 missed, 110 branches and 12 partial branches. No coverage gate was lowered.
+- `make preflight` passed the ARM64 image build, credential-free validation,
+  three real sandbox/runtime/configuration checks, 19 worker/publication checks
+  and seven lifecycle checks. `make synth` passed without deployment; existing
+  Node 25/jsii and CDK feature-flag notices remain (Node 22/24 recommended).
+  `git diff --check` and current-slice local-link, unique-heading and code-fence
+  checks passed.
+- No live AWS/GitHub Jobs, model calls, publication or deployment were run;
+  local service simulations do not establish live cloud behavior. Existing
+  US-05/US-06 authorization and verification gaps remain unchanged.
+
 ## Next Slice Recommendation
 - `US-05 Observe a controlled orchestration failure with cleanup`: requires separate live-run authorization, confirmed-absent baseline SHA, newly validated active Gate 2 image pin and scoped permissions. Local suite success does not establish this gate outcome.
 - `US-06 Verify the independent hard-lifespan fallback` follows separately; do not combine it with normal explicit cleanup.
