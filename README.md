@@ -3,12 +3,6 @@
 A proof of concept for turning one coding task into a tested GitHub PR inside an
 AWS Lambda MicroVM, then confirming VM termination.
 
-Implementation progress and live gate evidence belong only in
-[the current slice](docs/slices/current-slice.md).
-
-Accepted requirements are in [DECISIONS.md](DECISIONS.md); domain naming is in
-[CONTEXT.md](CONTEXT.md).
-
 ## Quick start
 
 Prerequisites: Python 3.14, `uv`, Make, and Node.js/npm for CDK. jsii recommends
@@ -24,14 +18,7 @@ make verify
 
 Setup creates `.venv` using `uv.lock` and installs the repository-local CDK CLI
 using `package-lock.json`; nothing is installed globally. Verification
-checks Python formatting, lint, tests through coverage, and the logging smoke
-check. Successful output includes a passing test and:
-
-```text
-INFO Local logging check passed.
-```
-
-The local Python version does not establish the MicroVM's runtime compatibility.
+checks Python formatting, lint, tests through coverage.
 
 ## Development
 
@@ -48,57 +35,49 @@ The local Python version does not establish the MicroVM's runtime compatibility.
 | `make synth` | Synthesize native CDK templates/assets locally; no deployment. |
 | `make preflight` | Build the ARM64 image and check real sandbox/search/edit/tests/Git plus simulated-service worker/lifecycle tests. |
 
-Make commands use `uv run --locked`, so checks use the project environment rather
-than a globally installed Ruff or coverage.py. Ruff checks Python files only.
-Ruff, coverage.py, CDK, and constructs are development-only dependencies. Worker
-runtime code uses the standard library and image-installed CLIs. No type-check
-or CI workflow is configured. CDK deploy/diff commands are repository-local
-`npm run deploy -- ...` / `npm run diff -- ...`; these require AWS access and
-separate operator authorization. Deployment ordering and the verified image pin
-are recorded in the current slice, not inferred from local synthesis.
-
 The separate demonstration repository,
-[TeroTS/factory-smoke-test](https://github.com/TeroTS/factory-smoke-test),
-remains dependency-free; its setup must not be confused with this factory's
-`uv` environment.
+[TeroTS/factory-smoke-test](https://github.com/TeroTS/factory-smoke-test).
 
-## Testing and coverage
+### Live AWS/GitHub happy-path test
 
-Tests live in `tests/` and use the standard-library `unittest` runner. Run the
-focused logging test from the repository root with:
+Requires completed Gate 1, explicit operator approval, Docker, authenticated
+`gh`, and AWS profile `AWSAdministratorAccess-172318459814` in `us-east-1`.
+This deploys resources and runs a billable model/publication Job. From the
+repository root, run one stage at a time and review each confirmation:
 
 ```sh
-uv run --locked python -m unittest discover -s tests -p test_logging_smoke.py -v
+uv run --locked python -m tools.validate_deploy_image
+# Set IMAGE_VERSION to the verified version printed by the first stage.
+uv run --locked python -m tools.deploy_infra --version "$IMAGE_VERSION"
 ```
 
-Tests cover the worker's completion evidence, lifecycle HTTP/process behavior,
-image pinning, native CDK definitions, and simulated workflow paths. External
-AWS/model/GitHub services are simulated locally; those tests are not live gate
-acceptance. `make preflight` additionally runs the explicit real Linux sandbox
-test, which is deliberately skipped in host-only `make verify`.
+You choose `EXECUTION_NAME`: it is a unique label and AWS idempotency key, not an
+ID obtained from AWS. For a **new Job only**, generate one and copy the
+[example Job](tools/happy-path-job.json) to a temporary absolute path:
 
-Coverage is configured in [pyproject.toml](pyproject.toml):
+```sh
+EXECUTION_NAME="happy-path-$(uv run --locked python -c 'import uuid; print(uuid.uuid4().hex)')"
+JOB_FILE="$(mktemp "${TMPDIR:-/tmp}/factory-happy-path.XXXXXX")"
+cp tools/happy-path-job.json "$JOB_FILE"
+printf 'Retain EXECUTION_NAME=%s\nRetain JOB_FILE=%s\n' "$EXECUTION_NAME" "$JOB_FILE"
+```
 
-- `source = ["tools", "worker", "infra", "image"]` includes worker, native CDK,
-  local tools, and the fixed demonstration acceptance check.
-- Branch coverage is enabled; missing lines appear in the report.
-- No minimum coverage percentage is enforced (`fail_under` is not configured).
+Edit the copied file: replace `baseSha` with the full 40-character SHA of your
+reviewed, tested baseline. Obtain it with `git rev-parse HEAD` in the target
+repository.
 
-Local tests/synthesis do not deploy AWS resources, call the model, publish work,
-or establish live runtime compatibility.
+```sh
+uv run --locked python -m tools.run_happy_path \
+  --name "$EXECUTION_NAME" --job-file "$JOB_FILE"
+```
 
-## Local logging and configuration
-
-[tools/logging_smoke.py](tools/logging_smoke.py) uses standard-library logging at
-`INFO` level on stderr. It emits a fixed message, not credentials or job data,
-and makes no AWS calls. Worker deployment supplies `WORKSPACE`, `AWS_REGION`,
-`GITHUB_SECRET_ARN`, and `EXPECTED_RUNTIME_ROLE`; no credential values belong in
-those settings. Lambda MicroVMs forwards available worker stdout/stderr to the
-scoped CloudWatch group. Never forward host profiles/credentials to preflight.
+After interruption, reuse the **same name and unchanged Job file**; do not rerun
+the preparation commands or generate a new name. Retain the printed values and
+file for recovery. The script checks the PR and confirmed VM termination; it
+never merges.
 
 ## Repository structure
 
-- [DECISIONS.md](DECISIONS.md): accepted scope, demonstration inputs, and two gates.
 - [CONTEXT.md](CONTEXT.md): canonical domain vocabulary.
 - [AGENTS.md](AGENTS.md): guidance for coding agents.
 - [Makefile](Makefile), [pyproject.toml](pyproject.toml), and [uv.lock](uv.lock):
@@ -109,19 +88,3 @@ scoped CloudWatch group. Never forward host profiles/credentials to preflight.
   command/source/publication evidence verification.
 - `image/`: package-managed ARM64 Dockerfile and fixed demonstration acceptance.
 - `infra/`: native CDK app/stacks and Step Functions ASL.
-- [PoC plan](docs/plans/aws-lambda-microvm-software-factory-poc.md): architecture
-  and gate details. Accepted decisions supersede its earlier response shapes
-  and proposals where explicitly stated.
-- `docs/aws-lambda-microvms/`: local copies of AWS reference documentation.
-
-## Maintenance and safety
-
-Update this README and relevant agent guidance when setup, configuration,
-interfaces, or architecture change. Review dependency changes before updating
-`uv.lock` with `uv lock` and the CLI lockfile through npm; normal setup/checks
-must not silently update lockfiles.
-
-Future AWS and GitHub runs require the manual access and scoped credentials
-listed in [DECISIONS.md](DECISIONS.md). Keep secret values out of committed files,
-job input, prompts, and logs. Local verification does not deploy resources,
-publish branches, or prove either live gate.

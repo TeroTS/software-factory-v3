@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Software factory PoC — service architecture</title>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&amp;family=Geist:wght@400;500;600&amp;family=Geist+Mono:wght@400;500&amp;display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    :root {
+      --paper: #f5f5f5; --ink: #2d3142; --muted: #4f5d75; --soft: #5a6580;
+      --accent: #bf4520; --link: #2e5aa8; --rule: rgba(45,49,66,.12);
+      --sans: 'Geist', system-ui, sans-serif;
+      --serif: 'Instrument Serif', serif;
+      --mono: 'Geist Mono', ui-monospace, monospace;
+    }
+    body { margin: 0; padding: 48px 32px; background: var(--paper); color: var(--ink); font-family: var(--sans); }
+    main { max-width: 1280px; min-width: 0; margin: auto; }
+    .eyebrow { margin: 0 0 12px; color: var(--muted); font: 500 10px var(--mono); letter-spacing: .16em; text-transform: uppercase; }
+    h1 { margin: 0 0 12px; font: 400 40px/1.1 var(--serif); letter-spacing: -.02em; }
+    .intro { max-width: 760px; margin: 0; color: var(--muted); font-size: 14px; line-height: 1.65; }
+    .diagram-container { width: 100%; overflow-x: auto; }
+    svg { display: block; width: 100%; min-width: 1280px; }
+    svg text { fill: var(--ink); font-family: var(--sans); }
+    .name { font-size: 12px; font-weight: 600; }
+    .sub { font: 400 9px var(--mono); fill: var(--muted); }
+    .tag, .route-label { font: 400 8px var(--mono); fill: var(--soft); letter-spacing: .06em; }
+    .zone-label { font: 500 8px var(--mono); fill: var(--soft); letter-spacing: .14em; }
+    .note { font: 400 11px var(--sans); fill: var(--muted); }
+    .route { fill: none; stroke: var(--muted); stroke-width: 1.2; marker-end: url(#arrow); }
+    .api { stroke: var(--link); marker-end: url(#arrow-link); }
+    .async { stroke-dasharray: 5 4; }
+    .details { display: grid; grid-template-columns: 1.2fr 1fr; gap: 48px; border-top: 1px solid var(--rule); padding-top: 24px; }
+    h2 { margin: 0 0 8px; font-size: 14px; font-weight: 600; }
+    .details p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.7; }
+    code { font: .9em var(--mono); }
+    footer { margin-top: 32px; color: var(--soft); font-size: 11px; line-height: 1.7; }
+    a { color: var(--link); text-underline-offset: 3px; }
+    @media (max-width: 640px) { body { padding: 28px 16px; } h1 { font-size: 32px; } .details { grid-template-columns: 1fr; gap: 24px; } }
+    @media print { body { padding: 0; } .diagram-container { overflow-x: visible; } svg { min-width: 0; } }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <p class="eyebrow">Service architecture · Gate 2 · Operator-led proof of concept</p>
+    <h1>One coding task. A tested PR. A terminated VM.</h1>
+    <p class="intro">Step Functions coordinates one Job inside an isolated AWS Lambda MicroVM. The worker runs Codex, checks publication evidence, and exposes status until orchestration confirms cleanup.</p>
+  </header>
+  <div class="diagram-container">
+    <svg viewBox="0 0 1280 720" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="service-architecture-title service-architecture-desc">
+      <title id="service-architecture-title">Software factory PoC — service architecture</title>
+      <desc id="service-architecture-desc">An operator starts a Step Functions Job that launches a pinned Lambda MicroVM, polls its worker, and confirms termination after the worker uses Secrets Manager, Amazon Bedrock, and GitHub to produce a tested, unmerged PR.</desc>
+      <defs>
+        <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/></marker>
+        <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#bf4520"/></marker>
+        <marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#2e5aa8"/></marker>
+      </defs>
+      <rect width="1280" height="720" fill="#f5f5f5"/>
+
+      <!-- Grouping describes responsibility, not a VPC or network topology. -->
+      <rect x="248" y="96" width="552" height="168" rx="8" fill="rgba(45,49,66,.02)" stroke="rgba(45,49,66,.12)"/>
+      <text x="272" y="120" class="zone-label">AWS · ORCHESTRATION &amp; LIFECYCLE</text>
+      <rect x="520" y="352" width="360" height="260" rx="8" fill="rgba(45,49,66,.02)" stroke="#5a6580" stroke-dasharray="4 3"/>
+      <rect x="540" y="344" width="300" height="16" fill="#f5f5f5"/>
+      <text x="552" y="356" class="zone-label">ISOLATED LAMBDA MICROVM · ARM64</text>
+
+      <!-- Connections precede node bounds; each shared edge has distinct ports. -->
+      <line x1="200" y1="196" x2="280" y2="196" class="route"/>
+      <line x1="480" y1="196" x2="560" y2="196" class="route api"/>
+      <path d="M 380,232 V 420 Q 380,428 388,428 H 552" class="route api async"/>
+      <line x1="700" y1="232" x2="700" y2="392" class="route async"/>
+      <line x1="700" y1="464" x2="700" y2="512" class="route async"/>
+      <path d="M 848,530 H 912 Q 920,530 920,522 V 316 Q 920,308 928,308 H 1000" class="route api"/>
+      <path d="M 848,548 H 936 Q 944,548 944,540 V 436 Q 944,428 952,428 H 1000" class="route api"/>
+      <line x1="848" y1="566" x2="1000" y2="566" class="route api"/>
+
+      <!-- Opaque labels keep a visible eight-pixel gap from their routes. -->
+      <rect x="212" y="176" width="56" height="12" fill="#f5f5f5"/>
+      <text x="240" y="185" text-anchor="middle" class="route-label">START JOB</text>
+      <rect x="492" y="176" width="56" height="12" fill="#f5f5f5"/>
+      <text x="520" y="185" text-anchor="middle" class="route-label">AWS SDK</text>
+      <rect x="420" y="408" width="92" height="12" fill="#f5f5f5"/>
+      <text x="466" y="417" text-anchor="middle" class="route-label">POLL /STATUS</text>
+      <rect x="712" y="304" width="80" height="12" fill="#f5f5f5"/>
+      <text x="752" y="313" text-anchor="middle" class="route-label">RUN HOOK</text>
+      <rect x="712" y="480" width="80" height="12" fill="#f5f5f5"/>
+      <text x="752" y="489" text-anchor="middle" class="route-label">SPAWN ONCE</text>
+      <rect x="928" y="288" width="64" height="12" fill="#f5f5f5"/>
+      <text x="960" y="297" text-anchor="middle" class="route-label">GET SECRET</text>
+      <rect x="952" y="408" width="40" height="12" fill="#f5f5f5"/>
+      <text x="972" y="417" text-anchor="middle" class="route-label">GIT/GH</text>
+      <rect x="884" y="574" width="80" height="12" fill="#f5f5f5"/>
+      <text x="924" y="583" text-anchor="middle" class="route-label">INFERENCE</text>
+
+      <g>
+        <rect x="40" y="160" width="160" height="72" rx="6" fill="#f5f5f5"/>
+        <rect x="40" y="160" width="160" height="72" rx="6" fill="rgba(79,93,117,.10)" stroke="#5a6580"/>
+        <rect x="52" y="168" width="40" height="12" rx="2" fill="none" stroke="#5a6580"/>
+        <text x="72" y="177" text-anchor="middle" class="tag">INPUT</text>
+        <text x="56" y="200" class="name">Operator</text>
+        <text x="56" y="220" class="sub">repository · SHA · task</text>
+      </g>
+      <g>
+        <rect x="280" y="160" width="200" height="72" rx="6" fill="#f5f5f5"/>
+        <rect x="280" y="160" width="200" height="72" rx="6" fill="rgba(191,69,32,.08)" stroke="#bf4520"/>
+        <rect x="292" y="168" width="64" height="12" rx="2" fill="none" stroke="#bf4520"/>
+        <text x="324" y="177" text-anchor="middle" class="tag">WORKFLOW</text>
+        <text x="296" y="200" class="name">AWS Step Functions</text>
+        <text x="296" y="220" class="sub">Standard · one Job at a time</text>
+      </g>
+      <g>
+        <rect x="560" y="160" width="200" height="72" rx="6" fill="#ffffff" stroke="#2d3142"/>
+        <rect x="572" y="168" width="32" height="12" rx="2" fill="none" stroke="#5a6580"/>
+        <text x="588" y="177" text-anchor="middle" class="tag">API</text>
+        <text x="576" y="200" class="name">Lambda MicroVM service</text>
+        <text x="576" y="220" class="sub">launch · token · get · terminate</text>
+      </g>
+      <g>
+        <rect x="552" y="392" width="296" height="72" rx="6" fill="#ffffff" stroke="#2d3142"/>
+        <rect x="564" y="400" width="48" height="12" rx="2" fill="none" stroke="#5a6580"/>
+        <text x="588" y="409" text-anchor="middle" class="tag">SERVER</text>
+        <text x="568" y="432" class="name">Lifecycle &amp; status server</text>
+        <text x="568" y="452" class="sub">:8080 · /status → pending | ok | error</text>
+      </g>
+      <g>
+        <rect x="552" y="512" width="296" height="72" rx="6" fill="#ffffff" stroke="#2d3142"/>
+        <rect x="564" y="520" width="48" height="12" rx="2" fill="none" stroke="#5a6580"/>
+        <text x="588" y="529" text-anchor="middle" class="tag">WORKER</text>
+        <text x="568" y="552" class="name">Job worker + Codex CLI</text>
+        <text x="568" y="572" class="sub">setup → baseline tests → task → evidence</text>
+      </g>
+      <g>
+        <rect x="1000" y="272" width="240" height="72" rx="6" fill="#f5f5f5"/>
+        <rect x="1000" y="272" width="240" height="72" rx="6" fill="rgba(45,49,66,.05)" stroke="#4f5d75"/>
+        <rect x="1012" y="280" width="40" height="12" rx="2" fill="none" stroke="#5a6580"/>
+        <text x="1032" y="289" text-anchor="middle" class="tag">AWS</text>
+        <text x="1016" y="312" class="name">Secrets Manager</text>
+        <text x="1016" y="332" class="sub">Repository-scoped GitHub token</text>
+      </g>
+      <g>
+        <rect x="1000" y="392" width="240" height="72" rx="6" fill="#f5f5f5"/>
+        <rect x="1000" y="392" width="240" height="72" rx="6" fill="rgba(45,49,66,.03)" stroke="#5a6580"/>
+        <rect x="1012" y="400" width="64" height="12" rx="2" fill="none" stroke="#5a6580"/>
+        <text x="1044" y="409" text-anchor="middle" class="tag">EXTERNAL</text>
+        <text x="1016" y="432" class="name">GitHub demonstration repository</text>
+        <text x="1016" y="452" class="sub">Clone baseline · push branch · open PR</text>
+      </g>
+      <g>
+        <rect x="1000" y="512" width="240" height="72" rx="6" fill="#ffffff" stroke="#2d3142"/>
+        <rect x="1012" y="520" width="40" height="12" rx="2" fill="none" stroke="#5a6580"/>
+        <text x="1032" y="529" text-anchor="middle" class="tag">AWS</text>
+        <text x="1016" y="552" class="name">Amazon Bedrock</text>
+        <text x="1016" y="572" class="sub">Pinned model · scoped execution role</text>
+      </g>
+
+      <text x="280" y="52" class="note">Launch pinned image version; reuse execution name as client token.</text>
+      <text x="280" y="72" class="note">Terminate on success or failure; confirm TERMINATED before success.</text>
+      <text x="40" y="520" class="zone-label">AUTHENTICATED STATUS</text>
+      <text x="40" y="544" class="note">AWS proxy token scoped to port 8080.</text>
+      <text x="40" y="564" class="note">Step Functions HTTP task uses an EventBridge Connection.</text>
+      <text x="40" y="604" class="zone-label">BOUNDED EXECUTION</text>
+      <text x="40" y="628" class="note">30-minute VM maximum lifespan is the cleanup fallback.</text>
+
+      <!-- Legend stays outside the architecture area. -->
+      <line x1="40" y1="660" x2="1240" y2="660" stroke="rgba(45,49,66,.12)"/>
+      <text x="40" y="688" class="zone-label">RELATIONSHIPS</text>
+      <line x1="176" y1="684" x2="212" y2="684" class="route"/>
+      <text x="224" y="688" class="sub">Internal control</text>
+      <line x1="396" y1="684" x2="432" y2="684" class="route api"/>
+      <text x="444" y="688" class="sub">API / external call</text>
+      <line x1="640" y1="684" x2="676" y2="684" class="route async"/>
+      <text x="688" y="688" class="sub">Asynchronous / repeated interaction</text>
+    </svg>
+  </div>
+  <section class="details" aria-label="Architecture notes">
+    <div>
+      <h2>Success means evidence, not agent prose</h2>
+      <p>The worker reruns <code>./scripts/verify</code> and checks the committed change, baseline ancestry, clean workspace, remote branch/head, and exactly one matching open, unmerged PR. Human review still judges correctness; the factory never merges.</p>
+    </div>
+    <div>
+      <h2>Runtime view, not deployment topology</h2>
+      <p>Native Python CDK builds the artifact, image, and workflow stacks. S3 image-build assets, IAM details, CloudWatch log paths, and individual retry states are omitted. The worker uses internet egress; the VM boundary is not a VPC claim.</p>
+    </div>
+  </section>
+  <footer>
+    Source: <a href="../../infra/workflow.py">infra/workflow.py</a> · <a href="../../infra/stacks.py">infra/stacks.py</a> · <a href="../../worker/server.py">worker/server.py</a> · <a href="../../worker/task.py">worker/task.py</a> · <a href="../../image/managed_config.toml">image/managed_config.toml</a><br>
+    Static architecture derived from repository code, not a live AWS inventory. Web fonts are optional; system fallbacks work offline.
+  </footer>
+</main>
+</body>
+</html>
