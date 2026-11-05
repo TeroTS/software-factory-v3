@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 class ImagePinTests(unittest.TestCase):
     def setUp(self):
-        from tools.verify_image import verify
+        from src.tools.verify_image import verify
 
         self.verify = verify
         self.image = {
@@ -28,7 +28,7 @@ class ImagePinTests(unittest.TestCase):
     # Checks the deployment pin against synthesized source using read-only calls,
     # so verification cannot provision or update the image.
     def test_read_only_cli_checks_synthesized_source_and_prints_pin(self):
-        from tools.verify_image import main
+        from src.tools.verify_image import main
 
         with tempfile.TemporaryDirectory() as directory:
             template = Path(directory) / "image.json"
@@ -55,7 +55,7 @@ class ImagePinTests(unittest.TestCase):
                     ["verify_image", "--version", "1.0", "--template", str(template)],
                 ),
                 patch(
-                    "tools.verify_image.subprocess.check_output",
+                    "src.tools.verify_image.subprocess.check_output",
                     side_effect=[json.dumps(self.image), json.dumps(self.version)],
                 ) as read,
                 contextlib.redirect_stdout(io.StringIO()) as output,

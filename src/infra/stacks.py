@@ -34,10 +34,10 @@ from aws_cdk import (
     aws_stepfunctions as sfn,
 )
 
-from infra.workflow import CONNECTOR, definition
+from src.infra.workflow import CONNECTOR, definition
 
 SECRET = "arn:aws:secretsmanager:us-east-1:172318459814:secret:software-factory-poc/github-token-sXayGQ"
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 
 
 # Rebuild the generated staging directory with only current image/worker sources for the asset ZIP.
@@ -45,13 +45,14 @@ def stage_source(outdir):
     source = Path(outdir) / "factory-source"
     if source.exists():
         shutil.rmtree(source)
-    (source / "worker").mkdir(parents=True)
+    (source / "src/worker").mkdir(parents=True)
     (source / "image").mkdir()
     for name in ("requirements.txt", "managed_config.toml"):
         shutil.copyfile(ROOT / "image" / name, source / "image" / name)
     shutil.copyfile(ROOT / "image/Dockerfile", source / "Dockerfile")
-    for name in ("server.py", "task.py"):
-        shutil.copyfile(ROOT / "worker" / name, source / "worker" / name)
+    shutil.copyfile(ROOT / "src/__init__.py", source / "src/__init__.py")
+    for name in ("__init__.py", "server.py", "task.py"):
+        shutil.copyfile(ROOT / "src/worker" / name, source / "src/worker" / name)
     return str(source)
 
 
@@ -378,7 +379,7 @@ class Workflow(Stack):
             runtime=lambda_.Runtime.PYTHON_3_13,
             handler="handler.handle",
             code=lambda_.Code.from_asset(
-                str(ROOT / "receiver"), exclude=["__pycache__", "*.pyc"]
+                str(ROOT / "src/receiver"), exclude=["__pycache__", "*.pyc"]
             ),
             timeout=Duration.seconds(30),
             log_group=receiver_logs,

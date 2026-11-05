@@ -7,7 +7,7 @@ import unittest
 from aws_cdk import App, Environment
 from aws_cdk.assertions import Template
 
-from infra.stacks import Artifacts, Image, Workflow
+from src.infra.stacks import Artifacts, Image, Workflow
 
 
 class TaskError(Exception):

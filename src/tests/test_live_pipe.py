@@ -9,8 +9,8 @@ from aws_cdk import App, Environment
 from aws_cdk.assertions import Template
 from botocore.exceptions import ClientError
 
-from infra.stacks import Artifacts, Image, Workflow
-from tools import live
+from src.infra.stacks import Artifacts, Image, Workflow
+from src.tools import live
 
 
 @unittest.skipUnless(

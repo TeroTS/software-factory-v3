@@ -11,9 +11,9 @@ import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError
 
-from tools.verify_image import verify
+from src.tools.verify_image import verify
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 ACCOUNT = "172318459814"
 REGION = "us-east-1"
 IMAGE_ARN = f"arn:aws:lambda:{REGION}:{ACCOUNT}:microvm-image:software-factory-poc"

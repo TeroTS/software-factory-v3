@@ -1,4 +1,4 @@
-worker/task.py runs one controlled coding job inside a MicroVM, then checks that the agent really completed it.
+src/worker/task.py runs one controlled coding job inside a MicroVM, then checks that the agent really completed it.
 
 For example, adding multiply(a, b):
 
@@ -12,11 +12,11 @@ Logging redacts credentials. Failures return exit code 1; verified completion re
 
 ------
 
-worker/server.py is the MicroVM’s control server, not the coding worker. It listens on port
+src/worker/server.py is the MicroVM’s control server, not the coding worker. It listens on port
 8080.
 
 - parse_job() validates incoming job data.
-- Runtime starts worker.task once, tracks its exit, and terminates its process group.
+- Runtime starts src.worker.task once, tracks its exit, and terminates its process group.
 - make_server() exposes lifecycle hooks: ready, validate, run, terminate.
 - /status returns pending, ok, or error.
 

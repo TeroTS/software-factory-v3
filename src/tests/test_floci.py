@@ -13,9 +13,10 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import boto3
-import test_workflow
 from botocore.config import Config
 from botocore.exceptions import ClientError
+
+from src.tests import test_workflow
 
 ENDPOINT = "http://127.0.0.1:14566"
 INTERNAL = "http://floci:4566"

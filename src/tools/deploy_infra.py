@@ -1,5 +1,5 @@
 # Deploy the native lifecycle workflow at an explicitly verified image pin; never start a Job.
-from tools import live
+from src.tools import live
 
 
 # Review/deploy only orchestration, then validate actual definition, connection and source pin.

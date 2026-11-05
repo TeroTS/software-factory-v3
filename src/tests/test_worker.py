@@ -14,7 +14,7 @@ from botocore.stub import Stubber
 
 class PublicationTests(unittest.TestCase):
     def setUp(self):
-        from worker import task
+        from src.worker import task
 
         self.task = task
 
@@ -53,7 +53,7 @@ class PublicationTests(unittest.TestCase):
 
 class WorkerFixture(unittest.TestCase):
     def setUp(self, origin=None, workspace=None):
-        from worker import task
+        from src.worker import task
 
         self.task = task
         config_patch = patch.object(
@@ -61,7 +61,7 @@ class WorkerFixture(unittest.TestCase):
             "CODEX_CONFIG",
             task.CODEX_CONFIG
             if task.CODEX_CONFIG.is_file()
-            else Path(__file__).resolve().parents[1] / "image/managed_config.toml",
+            else Path(__file__).resolve().parents[2] / "image/managed_config.toml",
         )
         config_patch.start()
         self.addCleanup(config_patch.stop)

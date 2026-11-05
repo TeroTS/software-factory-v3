@@ -3,5 +3,7 @@
 !image/Dockerfile
 !image/requirements.txt
 !image/managed_config.toml
-!worker/
-!worker/*.py
+!src/
+!src/__init__.py
+!src/worker/
+!src/worker/*.py

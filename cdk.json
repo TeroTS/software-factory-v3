@@ -1,5 +1,5 @@
 {
-  "app": "uv run --locked python -m infra.app",
+  "app": "uv run --locked python -m src.infra.app",
   "versionReporting": false,
   "context": {
     "@aws-cdk/core:defaultCrossStackReferences": "strong"

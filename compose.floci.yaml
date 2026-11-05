@@ -22,7 +22,7 @@ services:
       timeout: 6s
       retries: 30
     volumes:
-      - ./tests/floci_github.py:/fixture.py:ro
+      - ./src/tests/floci_github.py:/fixture.py:ro
     networks: [local]
 networks:
   local:

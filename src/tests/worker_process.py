@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
-from test_worker import WorkerFixture
+from src.tests.test_worker import WorkerFixture
 
 
 # Reuse the parent's pinned local repository; report synthetic publication and invocation counts for assertions.

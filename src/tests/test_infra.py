@@ -12,7 +12,7 @@ from aws_cdk.assertions import Match, Template
 
 class InfrastructureTests(unittest.TestCase):
     def setUp(self):
-        from infra.stacks import Artifacts, Image, Workflow
+        from src.infra.stacks import Artifacts, Image, Workflow
 
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
@@ -32,10 +32,10 @@ class InfrastructureTests(unittest.TestCase):
     # Confirms the application entry point produces a local assembly, preserving
     # credential-free synthesis for reviewing infrastructure before deployment.
     def test_application_synthesizes_three_native_stacks_without_aws_lookups(self):
-        from infra.app import main
+        from src.infra.app import main
 
         entry = Path(self.directory.name) / "entry"
-        with patch("infra.app.App", return_value=App(outdir=str(entry))):
+        with patch("src.infra.app.App", return_value=App(outdir=str(entry))):
             main()
         self.assertTrue((entry / "manifest.json").is_file())
 
@@ -258,7 +258,7 @@ class InfrastructureTests(unittest.TestCase):
         )
 
     def test_staged_image_contains_pinned_runtime_dependencies(self):
-        from infra.stacks import stage_source
+        from src.infra.stacks import stage_source
 
         staged = Path(self.directory.name) / "factory-source"
         (staged / "stale.py").write_text("obsolete generated source\n")
@@ -273,11 +273,13 @@ class InfrastructureTests(unittest.TestCase):
                 "Dockerfile",
                 "image/requirements.txt",
                 "image/managed_config.toml",
-                "worker/server.py",
-                "worker/task.py",
+                "src/__init__.py",
+                "src/worker/__init__.py",
+                "src/worker/server.py",
+                "src/worker/task.py",
             },
         )
-        root = Path(__file__).resolve().parents[1]
+        root = Path(__file__).resolve().parents[2]
         self.assertEqual(
             (staged / "image/managed_config.toml").read_bytes(),
             (root / "image/managed_config.toml").read_bytes(),

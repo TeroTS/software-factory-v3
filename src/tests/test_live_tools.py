@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 
 class LiveToolsTests(unittest.TestCase):
     def module(self, name):
-        return importlib.import_module("tools." + name)
+        return importlib.import_module("src.tools." + name)
 
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
@@ -278,6 +278,12 @@ class LiveToolsTests(unittest.TestCase):
             contextlib.redirect_stdout(io.StringIO()) as output,
         ):
             live.cdk(session, "diff", "FactoryImage")
+        root = Path(__file__).resolve().parents[2]
+        self.assertEqual(run.call_args.kwargs["cwd"], root)
+        self.assertEqual(
+            run.call_args.args[0],
+            [str(root / "node_modules/.bin/cdk"), "diff", "FactoryImage"],
+        )
         self.assertNotIn("local-secret", output.getvalue())
         self.assertNotIn("local-secret", str(run.call_args.args))
         self.assertEqual(

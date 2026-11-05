@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import call, patch
 
-from worker.server import HOOK, Runtime, make_server, parse_job
+from src.worker.server import HOOK, Runtime, make_server, parse_job
 
 JOB = {
     "repository": "example/authorized-project",
@@ -118,7 +118,7 @@ class LifecycleTests(unittest.TestCase):
         original = subprocess.Popen
 
         def process(*args, **kwargs):
-            self.assertEqual(args[0], [sys.executable, "-m", "worker.task"])
+            self.assertEqual(args[0], [sys.executable, "-m", "src.worker.task"])
             return original(
                 [
                     sys.executable,
@@ -129,7 +129,7 @@ class LifecycleTests(unittest.TestCase):
             )
 
         envelope = json.dumps({"microvmId": "test", "runHookPayload": json.dumps(JOB)})
-        with patch("worker.server.subprocess.Popen", side_effect=process):
+        with patch("src.worker.server.subprocess.Popen", side_effect=process):
             self.assertEqual(self.request("POST", HOOK + "run", envelope), (200, b""))
         self.assertEqual(self.request("POST", HOOK + "run", envelope)[0], 409)
         self.runtime.process.wait(timeout=5)
@@ -153,7 +153,7 @@ class LifecycleTests(unittest.TestCase):
     # Returns a failed run-hook response and terminal error when spawning fails,
     # so an unstarted job cannot appear accepted or remain pending indefinitely.
     def test_process_start_failure_is_terminal_and_not_acknowledged(self):
-        with patch("worker.server.subprocess.Popen", side_effect=OSError()):
+        with patch("src.worker.server.subprocess.Popen", side_effect=OSError()):
             self.assertEqual(
                 self.request(
                     "POST",
@@ -180,14 +180,14 @@ class LifecycleTests(unittest.TestCase):
             return subprocess.CompletedProcess(args, 0, "sandbox-validation-ok\n", "")
 
         with (
-            patch("worker.server.shutil.which", return_value="tool") as which,
-            patch("worker.server.subprocess.run", side_effect=probe),
+            patch("src.worker.server.shutil.which", return_value="tool") as which,
+            patch("src.worker.server.subprocess.run", side_effect=probe),
         ):
             self.runtime.validate()
         self.assertIn(call(sys.executable), which.call_args_list)
         self.assertEqual(list(Path(self.directory.name).iterdir()), [])
         with (
-            patch("worker.server.shutil.which", return_value=None),
+            patch("src.worker.server.shutil.which", return_value=None),
             self.assertRaises(OSError),
         ):
             self.runtime.validate()

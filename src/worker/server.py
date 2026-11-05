@@ -104,7 +104,7 @@ class Runtime:
             self.started = True
             try:
                 self.process = subprocess.Popen(
-                    [sys.executable, "-m", "worker.task"],
+                    [sys.executable, "-m", "src.worker.task"],
                     stdin=subprocess.PIPE,
                     start_new_session=True,
                     text=True,

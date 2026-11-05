@@ -22,10 +22,11 @@ RUN useradd --create-home factory \
     && mkdir /workspace \
     && chown factory:factory /workspace
 WORKDIR /opt/factory
-COPY worker /opt/factory/worker
+COPY src/__init__.py /opt/factory/src/__init__.py
+COPY src/worker /opt/factory/src/worker
 # Root-owned managed policy cannot be overwritten by the worker or cloned repository.
 COPY image/managed_config.toml /etc/codex/managed_config.toml
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 WORKSPACE=/workspace AWS_REGION=us-east-1
 USER factory
 EXPOSE 8080
-CMD ["python3.13", "-m", "worker.server"]
+CMD ["python3.13", "-m", "src.worker.server"]

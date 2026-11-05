@@ -43,19 +43,19 @@ The separate demonstration repository,
 ### Live AWS/GitHub test
 
 ```sh
-uv run --locked python -m tools.validate_deploy_image
+uv run --locked python -m src.tools.validate_deploy_image
 # Set IMAGE_VERSION to the verified version printed by the first stage.
-uv run --locked python -m tools.deploy_infra --version "$IMAGE_VERSION"
+uv run --locked python -m src.tools.deploy_infra --version "$IMAGE_VERSION"
 ```
 
 You choose `EXECUTION_NAME`: it is a unique label and AWS idempotency key, not an
 ID obtained from AWS. For a **new Job only**, generate one and copy the
-[example Job](tools/happy-path-job.json) to a temporary absolute path:
+[example Job](src/tools/happy-path-job.json) to a temporary absolute path:
 
 ```sh
 EXECUTION_NAME="happy-path-$(uv run --locked python -c 'import uuid; print(uuid.uuid4().hex)')"
 JOB_FILE="$(mktemp "${TMPDIR:-/tmp}/factory-happy-path.XXXXXX")"
-cp tools/happy-path-job.json "$JOB_FILE"
+cp src/tools/happy-path-job.json "$JOB_FILE"
 printf 'Retain EXECUTION_NAME=%s\nRetain JOB_FILE=%s\n' "$EXECUTION_NAME" "$JOB_FILE"
 ```
 
@@ -64,7 +64,7 @@ reviewed, tested baseline. Obtain it with `git rev-parse HEAD` in the target
 repository.
 
 ```sh
-uv run --locked python -m tools.run_happy_path \
+uv run --locked python -m src.tools.run_happy_path \
   --name "$EXECUTION_NAME" --job-file "$JOB_FILE"
 ```
 
@@ -79,10 +79,10 @@ never merges.
 - [AGENTS.md](AGENTS.md): guidance for coding agents.
 - [Makefile](Makefile), [pyproject.toml](pyproject.toml), and [uv.lock](uv.lock):
   local commands, configuration, and pinned development dependencies.
-- `tools/`: non-production development smoke check.
-- `tests/`: standard-library worker/lifecycle/infrastructure tests.
-- `receiver/`: signed GitHub issue receiver; queues pinned Jobs without changing worker interfaces.
-- `worker/`: snapshot-safe lifecycle HTTP server, asynchronous worker, and
+- `src/tools/`: non-production development smoke check.
+- `src/tests/`: standard-library worker/lifecycle/infrastructure tests.
+- `src/receiver/`: signed GitHub issue receiver; queues pinned Jobs without changing worker interfaces.
+- `src/worker/`: snapshot-safe lifecycle HTTP server, asynchronous worker, and
   command/source/publication evidence verification.
 - `image/`: package-managed ARM64 Dockerfile and fixed demonstration acceptance.
-- `infra/`: native CDK app/stacks and Step Functions ASL.
+- `src/infra/`: native CDK app/stacks and Step Functions ASL.

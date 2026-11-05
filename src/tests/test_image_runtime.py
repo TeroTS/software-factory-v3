@@ -8,15 +8,17 @@ class ImageRuntimeTests(unittest.TestCase):
     # runtime without modifying the interpreter used by operating-system packages.
     def test_image_selects_python313_for_startup_and_repository_commands(self):
         dockerfile = (
-            Path(__file__).resolve().parents[1] / "image/Dockerfile"
+            Path(__file__).resolve().parents[2] / "image/Dockerfile"
         ).read_text()
         self.assertIn("dnf install -y python3.13 ", dockerfile)
         self.assertIn("ln -s /usr/bin/python3.13 /usr/local/bin/python3", dockerfile)
-        self.assertIn('CMD ["python3.13", "-m", "worker.server"]', dockerfile)
+        self.assertIn('CMD ["python3.13", "-m", "src.worker.server"]', dockerfile)
+        self.assertIn("COPY src/__init__.py /opt/factory/src/__init__.py", dockerfile)
+        self.assertIn("COPY src/worker /opt/factory/src/worker", dockerfile)
 
     # Static policy is packaged separately from credentials and owned by root in the image.
     def test_image_packages_factory_codex_policy(self):
-        root = Path(__file__).resolve().parents[1]
+        root = Path(__file__).resolve().parents[2]
         dockerfile = (root / "image/Dockerfile").read_text()
         self.assertIn(
             "COPY image/managed_config.toml /etc/codex/managed_config.toml", dockerfile
@@ -42,7 +44,7 @@ class ImageRuntimeTests(unittest.TestCase):
         )
 
     def test_image_installs_only_locked_runtime_dependencies(self):
-        root = Path(__file__).resolve().parents[1]
+        root = Path(__file__).resolve().parents[2]
         dockerfile = (root / "image/Dockerfile").read_text()
         self.assertIn("python3.13-pip", dockerfile)
         self.assertIn("COPY image/requirements.txt", dockerfile)

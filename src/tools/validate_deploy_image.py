@@ -1,5 +1,5 @@
 # Validate the current ARM64 source, review native CDK changes and deploy only storage/image resources.
-from tools import live
+from src.tools import live
 
 
 # Run local gates before approval; stop on failed deployment or mismatched active image source.
@@ -36,7 +36,7 @@ def main(argv=None):
     live.verify_source(session, version)
     print("Verified current-source SUCCESSFUL/ACTIVE image version: " + version)
     print(
-        "Next: uv run --locked python -m tools.deploy_infra --version "
+        "Next: uv run --locked python -m src.tools.deploy_infra --version "
         + version
         + " --profile "
         + args.profile

@@ -7,9 +7,9 @@ from pathlib import Path
 
 from botocore.exceptions import ClientError
 
-from tools import live
-from worker.server import parse_job
-from worker.task import redact, verify_pr
+from src.tools import live
+from src.worker.server import parse_job
+from src.worker.task import redact, verify_pr
 
 
 # Recover known launch IDs from restricted history without printing token-bearing state.

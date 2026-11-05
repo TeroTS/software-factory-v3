@@ -7,10 +7,8 @@ import threading
 from pathlib import Path
 from unittest.mock import patch
 
-import test_worker
-import test_workflow
-
-from worker.server import HOOK, Runtime, make_server
+from src.tests import test_worker, test_workflow
+from src.worker.server import HOOK, Runtime, make_server
 
 
 class JobOutcomeTests(test_worker.WorkerFixture, test_workflow.WorkflowFixture):
@@ -53,20 +51,20 @@ class JobOutcomeTests(test_worker.WorkerFixture, test_workflow.WorkflowFixture):
                 connection.close()
 
         def process(args, **kwargs):
-            self.assertEqual(args, [sys.executable, "-m", "worker.task"])
-            root = Path(__file__).resolve().parents[1]
+            self.assertEqual(args, [sys.executable, "-m", "src.worker.task"])
+            root = Path(__file__).resolve().parents[2]
             # Never forward host AWS/GitHub credentials to the simulated worker.
             kwargs["env"] = {
                 "PATH": os.environ["PATH"],
                 "HOME": str(self.root),
-                "PYTHONPATH": os.pathsep.join((str(root), str(root / "tests"))),
+                "PYTHONPATH": str(root),
                 "AWS_EC2_METADATA_DISABLED": "true",
             }
             return popen(
                 [
                     sys.executable,
                     "-m",
-                    "worker_process",
+                    "src.tests.worker_process",
                     str(self.origin),
                     str(workspace),
                     scenario,
@@ -79,7 +77,7 @@ class JobOutcomeTests(test_worker.WorkerFixture, test_workflow.WorkflowFixture):
 
         def launch(args):
             self.assertEqual(json.loads(args["RunHookPayload"]), self.job)
-            with patch("worker.server.subprocess.Popen", side_effect=process):
+            with patch("src.worker.server.subprocess.Popen", side_effect=process):
                 self.assertEqual(
                     request(
                         "POST",

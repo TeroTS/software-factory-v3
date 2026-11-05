@@ -12,7 +12,7 @@ from pathlib import Path
 import boto3
 from botocore.config import Config
 
-from worker.server import parse_job
+from src.worker.server import parse_job
 
 CODEX_CONFIG = Path("/etc/codex/managed_config.toml")
 AWS_CONFIG = Config(
