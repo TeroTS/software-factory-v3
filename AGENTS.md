@@ -44,6 +44,20 @@ make synth
 make preflight
 ```
 
+## Agent skills
+
+### Issue tracker
+
+Tickets live under `.scratch/<feature>/`. Before reading or writing tickets, read `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the five default triage roles. Before triaging, read `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: `GLOSSARY.md` and `docs/adr/`. Before exploring terms or decisions, read `docs/agents/domain.md`.
+
 ## Commenting Convention
 
 - Every production module and function must have a comment directly above it.
