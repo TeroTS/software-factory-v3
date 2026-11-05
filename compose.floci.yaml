@@ -1,0 +1,32 @@
+name: factory-github-local
+services:
+  floci:
+    image: floci/floci:2.4.0@sha256:5ee85db604c4aa74ac76e07ea5cc83086f37bb472bf3dbb97e34019e48efae9c
+    ports:
+      - "127.0.0.1:14566:4566"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      FLOCI_BASE_URL: http://floci:4566
+      FLOCI_HOSTNAME: floci
+      FLOCI_SERVICES_DOCKER_NETWORK: factory-github-local
+      FLOCI_DOCKER_RESOURCE_NAMESPACE: factory-github-local
+      FLOCI_SERVICES_UI_ENABLED: "false"
+    networks: [local, ingress]
+  github:
+    image: python:3.13.9-slim@sha256:326df678c20c78d465db501563f3492d17c42a4afe33a1f2bf5406a1d56b0e86
+    command: [python, /fixture.py]
+    healthcheck:
+      test: [CMD, python, -c, "import json, urllib.request; opener = urllib.request.build_opener(urllib.request.ProxyHandler({})); assert json.load(opener.open('http://floci:4566/_localstack/health', timeout=5))['version'] == '2.4.0'"]
+      interval: 2s
+      timeout: 6s
+      retries: 30
+    volumes:
+      - ./tests/floci_github.py:/fixture.py:ro
+    networks: [local]
+networks:
+  local:
+    name: factory-github-local
+    internal: true
+  ingress:
+    name: factory-github-local-ingress
