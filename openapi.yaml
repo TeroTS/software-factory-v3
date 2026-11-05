@@ -20,7 +20,7 @@ paths:
     post:
       operationId: receiveIssue
       summary: Request a pinned Job from a signed issue-opening delivery
-      description: 'Accept only issues/opened in the deployment-authorized repository, excluding PRs. Verify HMAC-SHA256 over the original HTTP body bytes (not reserialized JSON). Capture title and body, separated by two newlines when the body is nonempty; a null/empty body yields title only. Resolve the deployment-owned target branch to a full SHA with the existing scoped GitHub token, then enqueue the existing Job schema. Payload fields cannot select credentials or target configuration. Duplicate delivery may request duplicate/concurrent billable Jobs; receipt is not completion.'
+      description: 'Accept only issues/opened in the deployment-authorized repository, excluding PRs. Verify HMAC-SHA256 over the original HTTP body bytes (not reserialized JSON). Capture title and body, separated by two newlines when the body is nonempty; a null/empty body yields title only. Resolve the deployment-owned target branch to a full SHA with the existing scoped GitHub token, then conditionally store the existing Job schema in DynamoDB as PENDING. Payload fields cannot select credentials or target configuration. Duplicate delivery may request duplicate/concurrent billable Jobs; receipt is not completion.'
       security:
         - GitHubSignature: []
       parameters:
@@ -62,7 +62,7 @@ paths:
               description: Additional GitHub fields are ignored; comments and later edits are not fetched. Prepared Job JSON must fit the existing 16 KiB worker limit.
       responses:
         '202':
-          description: Prepared Job acknowledged by SQS; not workflow startup, publication, or VM termination.
+          description: Prepared Job accepted by DynamoDB; not workflow startup, publication, or VM termination.
           content:
             application/json:
               schema:
@@ -99,7 +99,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/WebhookReply'
         '502':
-          description: GitHub/token/baseline resolution or SQS request failed. No incomplete Job is sent; an uncertain SQS acknowledgement may still have accepted a complete Job. No application retries.
+          description: GitHub/token/baseline resolution or DynamoDB insertion failed, including an enqueue timestamp collision. A collision preserves the existing Job and rejects the new Job. An uncertain DynamoDB acknowledgement may still have accepted a complete Job. No application retries.
           content:
             application/json:
               schema:
@@ -272,7 +272,7 @@ components:
       maxItems: 1
       items:
         $ref: '#/components/schemas/Job'
-      description: The only Step Functions submission format for manual and Pipe callers. The workflow unwraps one Job for the worker; direct objects and other batch sizes are rejected before VM launch.
+      description: Direct Step Functions testing submission. The workflow unwraps one Job for the worker; direct Job objects and other batch sizes are rejected before VM launch. Direct tests have no queue reference and perform no terminal queue writes; the operator prevents overlap with queued Jobs. Dispatcher submissions carry this singleton array in jobs and the stored item's PK/SK separately in queue.
     Job:
       type: object
       additionalProperties: false

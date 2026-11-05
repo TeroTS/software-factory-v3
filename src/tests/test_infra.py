@@ -39,32 +39,59 @@ class InfrastructureTests(unittest.TestCase):
             main()
         self.assertTrue((entry / "manifest.json").is_file())
 
-    def test_signed_webhook_queue_and_async_pipe_reuse_standard_workflow(self):
+    def test_signed_webhook_and_stream_dispatch_reuse_standard_workflow(self):
         template = self.workflow_template
-        template.resource_count_is("AWS::Lambda::Function", 1)
+        template.resource_count_is("AWS::Lambda::Function", 2)
         template.has_resource_properties("AWS::Lambda::Url", {"AuthType": "NONE"})
-        template.resource_count_is("AWS::SQS::Queue", 2)
+        template.resource_count_is("AWS::SQS::Queue", 0)
+        template.resource_count_is("AWS::Pipes::Pipe", 0)
+        template.resource_count_is("AWS::Events::Connection", 1)
         template.has_resource_properties(
-            "AWS::SQS::Queue",
+            "AWS::DynamoDB::Table",
             {
-                "RedrivePolicy": {
-                    "maxReceiveCount": 1,
-                    "deadLetterTargetArn": Match.any_value(),
-                }
+                "KeySchema": [
+                    {"AttributeName": "PK", "KeyType": "HASH"},
+                    {"AttributeName": "SK", "KeyType": "RANGE"},
+                ],
+                "AttributeDefinitions": [
+                    {"AttributeName": "PK", "AttributeType": "S"},
+                    {"AttributeName": "SK", "AttributeType": "S"},
+                ],
+                "StreamSpecification": {"StreamViewType": "NEW_IMAGE"},
             },
         )
-        template.has_resource_properties(
-            "AWS::Pipes::Pipe",
-            {
-                "SourceParameters": {"SqsQueueParameters": {"BatchSize": 1}},
-                "Target": {"Ref": "Workflow"},
-                "TargetParameters": {
-                    "InputTemplate": '{"repository": <$.body.repository>, "baseSha": <$.body.baseSha>, "task": <$.body.task>}',
-                    "StepFunctionStateMachineParameters": {
-                        "InvocationType": "FIRE_AND_FORGET"
+        table_id, table_resource = next(
+            iter(template.find_resources("AWS::DynamoDB::Table").items())
+        )
+        self.assertNotIn("GlobalSecondaryIndexes", table_resource["Properties"])
+        states = self.workflow.node.find_child("CompleteQueuedJob").to_state_json()
+        self.assertEqual(
+            states["Parameters"]["TableName"], table_resource["Properties"]["TableName"]
+        )
+        table_arn = {"Fn::GetAtt": [table_id, "Arn"]}
+        stream_arn = {"Fn::GetAtt": [table_id, "StreamArn"]}
+        mapping = next(
+            iter(template.find_resources("AWS::Lambda::EventSourceMapping").values())
+        )["Properties"]
+        self.assertEqual(mapping["EventSourceArn"], stream_arn)
+        self.assertEqual(mapping["StartingPosition"], "TRIM_HORIZON")
+        self.assertEqual(
+            [
+                json.loads(item["Pattern"])
+                for item in mapping["FilterCriteria"]["Filters"]
+            ],
+            [
+                {
+                    "eventName": ["INSERT"],
+                    "dynamodb": {"NewImage": {"status": {"S": ["PENDING"]}}},
+                },
+                {
+                    "eventName": ["MODIFY"],
+                    "dynamodb": {
+                        "NewImage": {"status": {"S": ["COMPLETED", "FAILED"]}}
                     },
                 },
-            },
+            ],
         )
         template.has_resource_properties(
             "AWS::Lambda::Function",
@@ -75,7 +102,7 @@ class InfrastructureTests(unittest.TestCase):
                         "PR_TARGET_BRANCH": Match.any_value(),
                         "GITHUB_SECRET_ARN": Match.any_value(),
                         "WEBHOOK_SECRET": {"Ref": "WebhookSigningSecret"},
-                        "JOB_QUEUE_URL": Match.any_value(),
+                        "JOB_TABLE_NAME": Match.any_value(),
                     }
                 }
             },
@@ -87,11 +114,14 @@ class InfrastructureTests(unittest.TestCase):
         self.assertNotIn("AWS::SecretsManager::Secret", text)
         self.assertNotIn('"Resource": "*"', text)
         self.assertNotIn("states:StartSyncExecution", text)
-        self.assertIn("sqs:SendMessage", text)
-        self.assertIn("sqs:ReceiveMessage", text)
-        self.assertIn("sqs:DeleteMessage", text)
+        self.assertIn("dynamodb:PutItem", text)
+        self.assertIn("dynamodb:Query", text)
+        self.assertIn("dynamodb:UpdateItem", text)
         self.assertIn("states:StartExecution", text)
-        self.assertIn("pipes.amazonaws.com", text)
+        self.assertNotIn("pipes.amazonaws.com", text)
+        self.assertNotIn("JobQueueUrl", text)
+        self.assertNotIn("JobDeadLetterQueueUrl", text)
+        self.assertNotIn("sqs:", text)
         self.assertNotIn("AWSLambdaBasicExecutionRole", text)
         self.assertNotIn("LOCAL_AWS_ENDPOINT", text)
         self.assertNotIn("LOCAL_GITHUB_ENDPOINT", text)
@@ -110,28 +140,46 @@ class InfrastructureTests(unittest.TestCase):
                 }
             },
         )
-        function = next(
-            iter(template.find_resources("AWS::Lambda::Function").values())
-        )["Properties"]
-        pipe = next(iter(template.find_resources("AWS::Pipes::Pipe").values()))[
-            "Properties"
+        functions = [
+            resource["Properties"]
+            for resource in template.find_resources("AWS::Lambda::Function").values()
         ]
+        function = next(
+            item
+            for item in functions
+            if "WEBHOOK_SECRET" in item["Environment"]["Variables"]
+        )
+        dispatcher = next(
+            item
+            for item in functions
+            if "STATE_MACHINE_ARN" in item["Environment"]["Variables"]
+        )
         role_scopes = {
             function["Role"]["Fn::GetAtt"][0]: {
                 "secretsmanager:GetSecretValue": "arn:aws:secretsmanager:us-east-1:172318459814:secret:software-factory-poc/github-token-sXayGQ",
-                "sqs:SendMessage": pipe["Source"],
-                "sqs:GetQueueAttributes": pipe["Source"],
-                "sqs:GetQueueUrl": pipe["Source"],
+                "dynamodb:PutItem": table_arn,
             },
-            pipe["RoleArn"]["Fn::GetAtt"][0]: {
-                "sqs:ReceiveMessage": pipe["Source"],
-                "sqs:DeleteMessage": pipe["Source"],
-                "sqs:ChangeMessageVisibility": pipe["Source"],
-                "sqs:GetQueueAttributes": pipe["Source"],
-                "sqs:GetQueueUrl": pipe["Source"],
-                "states:StartExecution": pipe["Target"],
+            dispatcher["Role"]["Fn::GetAtt"][0]: {
+                "dynamodb:Query": table_arn,
+                "dynamodb:UpdateItem": table_arn,
+                "dynamodb:DescribeStream": stream_arn,
+                "dynamodb:GetRecords": stream_arn,
+                "dynamodb:GetShardIterator": stream_arn,
+                "states:StartExecution": {"Ref": "Workflow"},
             },
         }
+        machine = template.find_resources("AWS::StepFunctions::StateMachine")[
+            "Workflow"
+        ]["Properties"]
+        execution_role = machine["RoleArn"]["Fn::GetAtt"][0]
+        queue_actions = [
+            (statement["Action"], statement["Resource"])
+            for policy in template.find_resources("AWS::IAM::Policy").values()
+            if {"Ref": execution_role} in policy["Properties"].get("Roles", [])
+            for statement in policy["Properties"]["PolicyDocument"]["Statement"]
+            if "dynamodb:" in json.dumps(statement["Action"])
+        ]
+        self.assertEqual(queue_actions, [("dynamodb:UpdateItem", table_arn)])
         for role_id, expected in role_scopes.items():
             actual = {}
             for policy in template.find_resources("AWS::IAM::Policy").values():

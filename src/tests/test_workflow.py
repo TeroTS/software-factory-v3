@@ -49,11 +49,30 @@ def parameters(value, data, context):
 def choice(rule, data, context):
     if "Condition" in rule:
         # Model only this predicate; the opt-in AWS test executes the real JSONata state.
-        assert rule["Condition"] == (
+        direct = (
             "{% $type($states.input) = 'array' and $count($states.input) = 1 "
             "and $type($states.input[0]) = 'object' %}"
         )
-        return isinstance(data, list) and len(data) == 1 and isinstance(data[0], dict)
+        if rule["Condition"] == direct:
+            return (
+                isinstance(data, list) and len(data) == 1 and isinstance(data[0], dict)
+            )
+        assert rule["Condition"] == (
+            "{% $type($states.input) = 'object' and $type($states.input.jobs) = 'array' "
+            "and $count($states.input.jobs) = 1 and $type($states.input.jobs[0]) = 'object' "
+            "and $type($states.input.queue) = 'object' and $states.input.queue.PK = 'JOBS' "
+            "and $type($states.input.queue.SK) = 'string' and $states.input.queue.SK != '' %}"
+        )
+        return (
+            isinstance(data, dict)
+            and isinstance(data.get("jobs"), list)
+            and len(data["jobs"]) == 1
+            and isinstance(data["jobs"][0], dict)
+            and isinstance(data.get("queue"), dict)
+            and data["queue"].get("PK") == "JOBS"
+            and isinstance(data["queue"].get("SK"), str)
+            and bool(data["queue"]["SK"])
+        )
     if "And" in rule:
         return all(choice(item, data, context) for item in rule["And"])
     if "Or" in rule:
@@ -436,6 +455,71 @@ class WorkflowTests(WorkflowFixture):
         self.assertEqual(kind, "Fail")
         self.assertEqual(json.loads(calls[0][1]["RunHookPayload"]), job)
         self.assertEqual(output["termination"], "TERMINATED")
+
+    def test_queued_success_persists_matching_keys_after_confirmed_termination(self):
+        job = {"repository": "example/fixture", "baseSha": "b" * 40, "task": "Change"}
+        key = {"PK": "JOBS", "SK": "2026-11-05T12:00:00.000000Z"}
+        kind, output, calls, final = simulate(
+            self.definition,
+            {**self.replies, "CompleteQueuedJob": [{}]},
+            job={"jobs": [job], "queue": key},
+        )
+        self.assertEqual((kind, final), ("Succeed", "JobSucceeded"))
+        self.assertEqual(json.loads(calls[0][1]["RunHookPayload"]), job)
+        self.assertEqual(
+            [name for name, _ in calls][-3:],
+            ["GetTerminationState", "GetTerminationState", "CompleteQueuedJob"],
+        )
+        self.assertEqual(
+            calls[-1][1]["Key"], {name: {"S": value} for name, value in key.items()}
+        )
+        self.assertEqual(
+            calls[-1][1]["ExpressionAttributeValues"], {":status": {"S": "COMPLETED"}}
+        )
+        self.assertEqual(
+            output,
+            {"microvmId": "microvm-test", "status": "ok", "termination": "TERMINATED"},
+        )
+        states = self.definition["States"]
+        self.assertTrue(
+            states["CompleteQueuedJob"]["Resource"].endswith(
+                "aws-sdk:dynamodb:updateItem"
+            )
+        )
+        self.assertEqual(states["CompleteQueuedJob"]["Next"], "EndResult")
+
+    def test_queued_failures_and_unconfirmed_cleanup_do_not_release_queue(self):
+        queued = {
+            "jobs": [{"task": "Change"}],
+            "queue": {"PK": "JOBS", "SK": "timestamp"},
+        }
+        for state, replies in (
+            ("LaunchVM", [TaskError()]),
+            ("PollWorker", [{"StatusCode": 200, "ResponseBody": {"status": "error"}}]),
+            ("TerminateVM", [TaskError()]),
+            ("GetTerminationState", [{"State": "RUNNING"}]),
+        ):
+            with self.subTest(state=state):
+                kind, _, calls, _ = simulate(
+                    self.definition, {**self.replies, state: replies}, job=queued
+                )
+                self.assertEqual(kind, "Fail")
+                self.assertNotIn("CompleteQueuedJob", [name for name, _ in calls])
+
+    def test_terminal_persistence_failure_does_not_report_success(self):
+        kind, _, calls, final = simulate(
+            self.definition,
+            {**self.replies, "CompleteQueuedJob": [TaskError()]},
+            job={
+                "jobs": [{"task": "Change"}],
+                "queue": {"PK": "JOBS", "SK": "timestamp"},
+            },
+        )
+        self.assertEqual((kind, final), ("Fail", "CompleteQueuedJob"))
+        self.assertEqual(
+            [name for name, _ in calls][-2:],
+            ["GetTerminationState", "CompleteQueuedJob"],
+        )
 
     def test_pending_timeout_does_not_run_catch_cleanup(self):
         for state, reply in (

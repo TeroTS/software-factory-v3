@@ -10,6 +10,7 @@ from aws_cdk import (
     RemovalPolicy,
     Stack,
 )
+from aws_cdk import aws_dynamodb as dynamodb
 from aws_cdk import (
     aws_events as events,
 )
@@ -22,14 +23,12 @@ from aws_cdk import (
 from aws_cdk import (
     aws_logs as logs,
 )
-from aws_cdk import aws_pipes as pipes
 from aws_cdk import (
     aws_s3 as s3,
 )
 from aws_cdk import (
     aws_s3_assets as assets,
 )
-from aws_cdk import aws_sqs as sqs
 from aws_cdk import (
     aws_stepfunctions as sfn,
 )
@@ -324,6 +323,18 @@ class Workflow(Stack):
                 resources=[connection.attr_secret_arn],
             )
         )
+        # Share the explicit name with ASL so prospective validation needs no deployed table lookup.
+        table_name = "software-factory-poc-jobs"
+        jobs = dynamodb.Table(
+            self,
+            "JobsTable",
+            table_name=table_name,
+            partition_key=dynamodb.Attribute(
+                name="PK", type=dynamodb.AttributeType.STRING
+            ),
+            sort_key=dynamodb.Attribute(name="SK", type=dynamodb.AttributeType.STRING),
+            stream=dynamodb.StreamViewType.NEW_IMAGE,
+        )
         machine = sfn.StateMachine(
             self,
             "Workflow",
@@ -340,6 +351,8 @@ class Workflow(Stack):
                     image.runtime.role_arn,
                     connection.attr_arn,
                     image.log_group_name,
+                    table_name,
+                    jobs.table_arn,
                 )
             ),
         )
@@ -356,13 +369,6 @@ class Workflow(Stack):
             no_echo=True,
             min_length=1,
             description="GitHub signing secret; supply privately, never in source or command history.",
-        )
-        dlq = sqs.Queue(self, "JobDeadLetters")
-        queue = sqs.Queue(
-            self,
-            "IssueJobs",
-            visibility_timeout=Duration.seconds(60),
-            dead_letter_queue=sqs.DeadLetterQueue(queue=dlq, max_receive_count=1),
         )
         receiver_logs = logs.LogGroup(
             self, "ReceiverLogs", removal_policy=RemovalPolicy.RETAIN
@@ -389,43 +395,79 @@ class Workflow(Stack):
                 "PR_TARGET_BRANCH": image.target_branch,
                 "GITHUB_SECRET_ARN": SECRET,
                 "WEBHOOK_SECRET": signing_secret.value_as_string,
-                "JOB_QUEUE_URL": queue.queue_url,
+                "JOB_TABLE_NAME": jobs.table_name,
             },
         )
-        queue.grant_send_messages(receiver)
+        receiver.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["dynamodb:PutItem"], resources=[jobs.table_arn]
+            )
+        )
         receiver.add_to_role_policy(
             iam.PolicyStatement(
                 actions=["secretsmanager:GetSecretValue"], resources=[SECRET]
             )
         )
         url = receiver.add_function_url(auth_type=lambda_.FunctionUrlAuthType.NONE)
-        pipe_role = iam.Role(
-            self,
-            "IssuePipeRole",
-            assumed_by=iam.ServicePrincipal("pipes.amazonaws.com"),
+        dispatcher_logs = logs.LogGroup(
+            self, "DispatcherLogs", removal_policy=RemovalPolicy.RETAIN
         )
-        queue.grant_consume_messages(pipe_role)
-        machine.grant_start_execution(pipe_role)
-        pipe = pipes.CfnPipe(
+        dispatcher_role = iam.Role(
             self,
-            "IssuePipe",
-            role_arn=pipe_role.role_arn,
-            source=queue.queue_arn,
-            target=machine.state_machine_arn,
-            source_parameters=pipes.CfnPipe.PipeSourceParametersProperty(
-                sqs_queue_parameters=pipes.CfnPipe.PipeSourceSqsQueueParametersProperty(
-                    batch_size=1
-                )
+            "DispatcherRole",
+            assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
+        )
+        dispatcher_logs.grant_write(dispatcher_role)
+        dispatcher = lambda_.Function(
+            self,
+            "Dispatcher",
+            runtime=lambda_.Runtime.PYTHON_3_13,
+            handler="handler.handle",
+            code=lambda_.Code.from_asset(
+                str(ROOT / "src/dispatcher"), exclude=["__pycache__", "*.pyc"]
             ),
-            target_parameters=pipes.CfnPipe.PipeTargetParametersProperty(
-                # Bare body substitution strips JSON quotes; object fields preserve escaping within AWS's batch.
-                input_template='{"repository": <$.body.repository>, "baseSha": <$.body.baseSha>, "task": <$.body.task>}',
-                step_function_state_machine_parameters=pipes.CfnPipe.PipeTargetStateMachineParametersProperty(
-                    invocation_type="FIRE_AND_FORGET"
-                ),
+            timeout=Duration.seconds(30),
+            log_group=dispatcher_logs,
+            role=dispatcher_role,
+            environment={
+                "JOB_TABLE_NAME": jobs.table_name,
+                "STATE_MACHINE_ARN": machine.state_machine_arn,
+            },
+        )
+        dispatcher.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["dynamodb:Query", "dynamodb:UpdateItem"],
+                resources=[jobs.table_arn],
+            )
+        )
+        dispatcher.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "dynamodb:DescribeStream",
+                    "dynamodb:GetRecords",
+                    "dynamodb:GetShardIterator",
+                ],
+                resources=[jobs.table_stream_arn],
+            )
+        )
+        machine.grant_start_execution(dispatcher)
+        mapping = lambda_.CfnEventSourceMapping(
+            self,
+            "JobNotifications",
+            function_name=dispatcher.function_name,
+            event_source_arn=jobs.table_stream_arn,
+            starting_position="TRIM_HORIZON",
+            filter_criteria=lambda_.CfnEventSourceMapping.FilterCriteriaProperty(
+                filters=[
+                    lambda_.CfnEventSourceMapping.FilterProperty(
+                        pattern='{"eventName":["INSERT"],"dynamodb":{"NewImage":{"status":{"S":["PENDING"]}}}}'
+                    ),
+                    lambda_.CfnEventSourceMapping.FilterProperty(
+                        pattern='{"eventName":["MODIFY"],"dynamodb":{"NewImage":{"status":{"S":["COMPLETED","FAILED"]}}}}'
+                    ),
+                ]
             ),
         )
-        pipe.node.add_dependency(pipe_role)
+        mapping.node.add_dependency(dispatcher_role)
         CfnOutput(self, "WebhookUrl", value=url.url)
-        CfnOutput(self, "JobQueueUrl", value=queue.queue_url)
-        CfnOutput(self, "JobDeadLetterQueueUrl", value=dlq.queue_url)
+        CfnOutput(self, "JobTableName", value=jobs.table_name)

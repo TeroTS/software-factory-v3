@@ -18,12 +18,13 @@ include = ["*.py", "*.pyi"]
 [tool.ruff.per-file-target-version]
 "src/worker/*.py" = "py313"
 "src/receiver/*.py" = "py313"
+"src/dispatcher/*.py" = "py313"
 "image/*.py" = "py313"
 "src/tests/*.py" = "py313"
 
 [tool.coverage.run]
 branch = true
-source = ["src/tools", "src/worker", "src/infra", "image", "src/receiver"]
+source = ["src/tools", "src/worker", "src/infra", "image", "src/receiver", "src/dispatcher"]
 
 [tool.coverage.report]
 show_missing = true

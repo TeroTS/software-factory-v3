@@ -3,7 +3,6 @@ import hmac
 import io
 import json
 import os
-import time
 import unittest
 import urllib.error
 import urllib.request
@@ -13,10 +12,8 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import boto3
+from boto3.dynamodb.types import TypeDeserializer
 from botocore.config import Config
-from botocore.exceptions import ClientError
-
-from src.tests import test_workflow
 
 ENDPOINT = "http://127.0.0.1:14566"
 INTERNAL = "http://floci:4566"
@@ -25,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 @unittest.skipUnless(os.environ.get("FACTORY_FLOCI_TEST") == "1", "run make floci-test")
-class FlociTests(test_workflow.WorkflowFixture):
+class FlociTests(unittest.TestCase):
     def client(self, service):
         client = boto3.Session().client(
             service,
@@ -44,15 +41,25 @@ class FlociTests(test_workflow.WorkflowFixture):
         return client
 
     def setUp(self):
-        super().setUp()
         self.name = "issue-" + uuid.uuid4().hex
-        self.sqs = self.client("sqs")
+        self.table = self.client("dynamodb")
+        self.table.create_table(
+            TableName=self.name,
+            KeySchema=[
+                {"AttributeName": "PK", "KeyType": "HASH"},
+                {"AttributeName": "SK", "KeyType": "RANGE"},
+            ],
+            AttributeDefinitions=[
+                {"AttributeName": "PK", "AttributeType": "S"},
+                {"AttributeName": "SK", "AttributeType": "S"},
+            ],
+            BillingMode="PAY_PER_REQUEST",
+            StreamSpecification={"StreamEnabled": True, "StreamViewType": "NEW_IMAGE"},
+        )
+        self.addCleanup(self.table.delete_table, TableName=self.name)
         self.lambda_ = self.client("lambda")
-        self.pipes = self.client("pipes")
-        self.sfn = self.client("stepfunctions")
-        self.microvms = self.client("lambda-microvms")
-        self.iam = self.client("iam")
-        role = self.iam.create_role(
+        iam = self.client("iam")
+        role = iam.create_role(
             RoleName=self.name,
             AssumeRolePolicyDocument=json.dumps(
                 {
@@ -60,38 +67,14 @@ class FlociTests(test_workflow.WorkflowFixture):
                     "Statement": [
                         {
                             "Effect": "Allow",
-                            "Principal": {
-                                "Service": [
-                                    "lambda.amazonaws.com",
-                                    "pipes.amazonaws.com",
-                                    "states.amazonaws.com",
-                                ]
-                            },
+                            "Principal": {"Service": "lambda.amazonaws.com"},
                             "Action": "sts:AssumeRole",
                         }
                     ],
                 }
             ),
         )["Role"]["Arn"]
-        self.addCleanup(self.iam.delete_role, RoleName=self.name)
-        self.dlq = self.sqs.create_queue(QueueName=self.name + "-dlq")["QueueUrl"]
-        self.addCleanup(self.sqs.delete_queue, QueueUrl=self.dlq)
-        dlq_arn = self.sqs.get_queue_attributes(
-            QueueUrl=self.dlq, AttributeNames=["QueueArn"]
-        )["Attributes"]["QueueArn"]
-        self.queue = self.sqs.create_queue(
-            QueueName=self.name,
-            Attributes={
-                "VisibilityTimeout": "1",
-                "RedrivePolicy": json.dumps(
-                    {"deadLetterTargetArn": dlq_arn, "maxReceiveCount": 1}
-                ),
-            },
-        )["QueueUrl"]
-        self.addCleanup(self.sqs.delete_queue, QueueUrl=self.queue)
-        queue_arn = self.sqs.get_queue_attributes(
-            QueueUrl=self.queue, AttributeNames=["QueueArn"]
-        )["Attributes"]["QueueArn"]
+        self.addCleanup(iam.delete_role, RoleName=self.name)
         secrets = self.client("secretsmanager")
         token = secrets.create_secret(
             Name=self.name, SecretString="local-github-token"
@@ -122,7 +105,7 @@ class FlociTests(test_workflow.WorkflowFixture):
                         else target,
                         "GITHUB_SECRET_ARN": token,
                         "WEBHOOK_SECRET": SECRET,
-                        "JOB_QUEUE_URL": self.queue,
+                        "JOB_TABLE_NAME": self.name,
                         "LOCAL_AWS_ENDPOINT": INTERNAL,
                         **(
                             {"LOCAL_GITHUB_ENDPOINT": "http://github:8080"}
@@ -136,63 +119,11 @@ class FlociTests(test_workflow.WorkflowFixture):
             url = self.lambda_.create_function_url_config(
                 FunctionName=name, AuthType="NONE"
             )["FunctionUrl"]
-            # Keep the returned Function URL's Host routing; connect to the loopback port without external DNS.
             parsed = urlsplit(url)
             self.assertTrue(
                 parsed.netloc.endswith(".lambda-url.us-east-1.floci:4566"), url
             )
             self.urls[target] = parsed.netloc
-        image = self.microvms.create_microvm_image(
-            name=self.name,
-            baseImageArn="arn:aws:lambda:us-east-1:aws:microvm-image:al2023-1",
-            buildRoleArn=role,
-            codeArtifact={"uri": "s3://local-fixture/image.zip"},
-        )["imageArn"]
-        self.addCleanup(self.microvms.delete_microvm_image, imageIdentifier=image)
-        connection = self.client("events").create_connection(
-            Name=self.name,
-            AuthorizationType="API_KEY",
-            AuthParameters={
-                "ApiKeyAuthParameters": {
-                    "ApiKeyName": "X-Poc-Connection",
-                    "ApiKeyValue": "software-factory-poc",
-                }
-            },
-        )["ConnectionArn"]
-        events = self.client("events")
-        self.addCleanup(events.delete_connection, Name=self.name)
-        # Resolve only deployment values in the existing fixture's synthesized ASL. Never replace states or AWS hops.
-        self.definition = json.loads(
-            json.dumps(self.definition).replace("arn:symbolic-value:", "arn:aws:")
-        )
-        launch = self.definition["States"]["LaunchVM"]["Parameters"]
-        launch.update(ImageIdentifier=image, ImageVersion="1.0", ExecutionRoleArn=role)
-        launch["Logging"]["CloudWatch"]["LogGroup"] = "/factory/local"
-        self.definition["States"]["PollWorker"]["Parameters"]["InvocationConfig"][
-            "ConnectionArn"
-        ] = connection
-        self.machine = self.sfn.create_state_machine(
-            name=self.name,
-            roleArn=role,
-            type="STANDARD",
-            definition=json.dumps(self.definition),
-        )["stateMachineArn"]
-        self.addCleanup(self.sfn.delete_state_machine, stateMachineArn=self.machine)
-        self.pipes.create_pipe(
-            Name=self.name,
-            RoleArn=role,
-            Source=queue_arn,
-            Target=self.machine,
-            DesiredState="STOPPED",
-            SourceParameters={"SqsQueueParameters": {"BatchSize": 1}},
-            TargetParameters={
-                "InputTemplate": '{"repository": <$.body.repository>, "baseSha": <$.body.baseSha>, "task": <$.body.task>}',
-                "StepFunctionStateMachineParameters": {
-                    "InvocationType": "FIRE_AND_FORGET"
-                },
-            },
-        )
-        self.addCleanup(self.pipes.delete_pipe, Name=self.name)
         self.payload = {
             "action": "opened",
             "repository": {"full_name": "example/authorized-project"},
@@ -241,6 +172,7 @@ class FlociTests(test_workflow.WorkflowFixture):
             )
         if tamper:
             body += b" "
+        # Route the returned Function URL through loopback without external DNS.
         headers["Host"] = self.urls[target]
         request = urllib.request.Request(
             ENDPOINT + "/", data=body, headers=headers, method=method
@@ -254,81 +186,24 @@ class FlociTests(test_workflow.WorkflowFixture):
             with error:
                 return error.code
 
-    def wait_for(self, observe):
-        deadline = time.monotonic() + 45
-        while time.monotonic() < deadline:
-            value = observe()
-            if value:
-                return value
-            time.sleep(0.25)
-        self.fail("Floci observation timed out")
+    def jobs(self):
+        return self.table.query(
+            TableName=self.name,
+            KeyConditionExpression="PK = :partition",
+            ExpressionAttributeValues={":partition": {"S": "JOBS"}},
+            ConsistentRead=True,
+        )["Items"]
 
-    def messages(self, queue):
-        return self.sqs.receive_message(QueueUrl=queue, MaxNumberOfMessages=10).get(
-            "Messages", []
-        )
-
-    def test_signed_post_queues_job_and_reports_floci_batching_gap(self):
+    def test_signed_http_receipt_stores_pinned_job_in_dynamodb(self):
         self.assertEqual(self.post(binary=True), 202)
-        message = self.wait_for(lambda: self.messages(self.queue))[0]
-        self.assertEqual(json.loads(message["Body"]), self.job)
-        # Manual inspection consumes this first delivery; a second HTTP delivery tests the complete queue handoff.
-        self.sqs.delete_message(
-            QueueUrl=self.queue, ReceiptHandle=message["ReceiptHandle"]
-        )
-        self.pipes.start_pipe(Name=self.name)
-        self.assertEqual(self.post(), 202)
-        execution = self.wait_for(
-            lambda: self.sfn.list_executions(stateMachineArn=self.machine)["executions"]
-        )[0]
-        outcome = self.wait_for(lambda: self.finished(execution["executionArn"]))
-        # Floci 2.4.0 incorrectly omits AWS's singleton-array wrapper; this is a gap, not valid input.
-        self.assertEqual(json.loads(outcome["input"]), self.job)
-        self.assertEqual(outcome["status"], "FAILED")
-        self.assertEqual(outcome["error"], "InvalidSubmission")
-        self.assertEqual(
-            outcome["cause"],
-            "Workflow input must be an array containing exactly one Job object.",
-        )
-        history = self.sfn.get_execution_history(
-            executionArn=execution["executionArn"]
-        )["events"]
-        self.assertNotIn("LaunchVM", json.dumps(history, default=str))
-        self.assertFalse(any(item["type"] == "TaskScheduled" for item in history))
-        print(
-            "Floci batching gap: direct object instead of [Job]; workflow correctly rejects it."
-        )
-        # The opt-in AWS regression verifies actual batching, JSON escaping, and entry behavior.
-        self.assertFalse(
-            self.messages(self.dlq),
-            "Acknowledged startup must not DLQ a later workflow failure",
-        )
-        # Probe the documented control-plane limitations directly, not as substitute workflow execution.
-        vm = self.microvms.run_microvm(
-            imageIdentifier=self.definition["States"]["LaunchVM"]["Parameters"][
-                "ImageIdentifier"
-            ],
-            imageVersion="1.0",
-        )
-        self.addCleanup(
-            self.microvms.terminate_microvm, microvmIdentifier=vm["microvmId"]
-        )
-        detail = self.microvms.get_microvm(microvmIdentifier=vm["microvmId"])
-        self.assertTrue(detail["endpoint"].endswith(".lambda-microvm.us-east-1.on.aws"))
-        # The control plane fabricates an AWS-shaped hostname; never connect to it in a local test.
-        with self.assertRaises(ClientError) as missing_auth:
-            self.microvms.create_microvm_auth_token(
-                microvmIdentifier=vm["microvmId"],
-                expirationInMinutes=30,
-                allowedPorts=[{"port": 8080}],
-            )
-        self.assertEqual(
-            missing_auth.exception.response["ResponseMetadata"]["HTTPStatusCode"], 404
-        )
-
-    def finished(self, arn):
-        value = self.sfn.describe_execution(executionArn=arn)
-        return value if value["status"] != "RUNNING" else None
+        items = self.jobs()
+        self.assertEqual(len(items), 1)
+        item = TypeDeserializer().deserialize({"M": items[0]})
+        self.assertEqual(item["job"], self.job)
+        self.assertEqual(item["status"], "PENDING")
+        self.assertEqual(item["PK"], "JOBS")
+        self.assertRegex(item["SK"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$")
+        # Receipt-only local test; actual Streams delivery is covered by the opt-in AWS check.
 
     def test_rejections_enqueue_no_job(self):
         cases = [
@@ -385,18 +260,7 @@ class FlociTests(test_workflow.WorkflowFixture):
         for arguments, status in cases:
             with self.subTest(arguments=arguments):
                 self.assertEqual(self.post(**arguments), status)
-        self.assertFalse(self.messages(self.queue))
-        self.assertFalse(
-            self.sfn.list_executions(stateMachineArn=self.machine)["executions"]
-        )
-
-    def test_queue_redrives_after_one_unacknowledged_receive(self):
-        self.assertEqual(self.post(), 202)
-        self.assertTrue(self.wait_for(lambda: self.messages(self.queue)))
-        time.sleep(1.1)
-        self.messages(self.queue)
-        message = self.wait_for(lambda: self.messages(self.dlq))[0]
-        self.assertEqual(json.loads(message["Body"]), self.job)
+        self.assertFalse(self.jobs())
 
 
 if __name__ == "__main__":

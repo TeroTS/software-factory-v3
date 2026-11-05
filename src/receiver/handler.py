@@ -7,6 +7,7 @@ import json
 import os
 import re
 from contextlib import closing
+from datetime import UTC, datetime
 from urllib.parse import quote
 
 import boto3
@@ -34,7 +35,7 @@ def handle(event, context):
     secret = os.environ.get("WEBHOOK_SECRET", "")
     repository = os.environ.get("AUTHORIZED_REPOSITORY", "")
     target = os.environ.get("PR_TARGET_BRANCH", "")
-    queue = os.environ.get("JOB_QUEUE_URL", "")
+    table = os.environ.get("JOB_TABLE_NAME", "")
     token_arn = os.environ.get("GITHUB_SECRET_ARN", "")
     local = os.environ.get("LOCAL_AWS_ENDPOINT")
     github_local = os.environ.get("LOCAL_GITHUB_ENDPOINT")
@@ -43,7 +44,7 @@ def handle(event, context):
         or not re.fullmatch(r"[A-Za-z0-9-]+/[A-Za-z0-9_.-]+", repository)
         or repository.split("/")[-1] in (".", "..")
         or not target.strip()
-        or not queue
+        or not table
         or not token_arn
         or (
             (local is not None or github_local is not None)
@@ -152,11 +153,17 @@ def handle(event, context):
             return response(502, "Baseline resolution failed")
         job["baseSha"] = baseline
         with closing(
-            session.client("sqs", endpoint_url=local, config=AWS_CONFIG)
+            session.client("dynamodb", endpoint_url=local, config=AWS_CONFIG)
         ) as client:
-            client.send_message(
-                QueueUrl=queue,
-                MessageBody=json.dumps(job, ensure_ascii=False, separators=(",", ":")),
+            client.put_item(
+                TableName=table,
+                Item={
+                    "PK": {"S": "JOBS"},
+                    "SK": {"S": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")},
+                    "status": {"S": "PENDING"},
+                    "job": {"M": {key: {"S": value} for key, value in job.items()}},
+                },
+                ConditionExpression="attribute_not_exists(PK) AND attribute_not_exists(SK)",
             )
     except (
         BotoCoreError,

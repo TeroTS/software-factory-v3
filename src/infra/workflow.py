@@ -31,11 +31,18 @@ def string(path, value=None):
     )
 
 
-# Validate one-Job workflow submissions, then launch/poll/terminate; reject bad envelopes before VM creation.
+# Use deployment pins to validate/launch/poll/terminate one Job; queued success persists to the supplied table after cleanup.
 def definition(
-    scope, image_arn, image_version, runtime_role, connection_arn, log_group
+    scope,
+    image_arn,
+    image_version,
+    runtime_role,
+    connection_arn,
+    log_group,
+    table_name,
+    table_arn,
 ):
-    # Pipes always batches; require the same singleton-array envelope for every caller.
+    # Direct tests retain [Job]; the Dispatcher carries queue keys separately from the worker payload.
     submission = sfn.Choice(
         scope, "CheckSubmission", query_language=sfn.QueryLanguage.JSONATA
     )
@@ -52,6 +59,18 @@ def definition(
             "and $type($states.input[0]) = 'object' %}"
         ),
         start,
+    )
+    queued_start = sfn.Pass(
+        scope, "QueuedInput", parameters={"job.$": "$.jobs[0]", "queue.$": "$.queue"}
+    )
+    submission.when(
+        sfn.Condition.jsonata(
+            "{% $type($states.input) = 'object' and $type($states.input.jobs) = 'array' "
+            "and $count($states.input.jobs) = 1 and $type($states.input.jobs[0]) = 'object' "
+            "and $type($states.input.queue) = 'object' and $states.input.queue.PK = 'JOBS' "
+            "and $type($states.input.queue.SK) = 'string' and $states.input.queue.SK != '' %}"
+        ),
+        queued_start,
     ).otherwise(invalid)
     failed = sfn.Fail(scope, "JobFailed", error_path="$.error", cause_path="$.cause")
     succeeded = sfn.Succeed(scope, "JobSucceeded")
@@ -212,6 +231,30 @@ def definition(
         },
     )
     outcome = sfn.Choice(scope, "CheckEndResult")
+    complete = tasks.CallAwsService(
+        scope,
+        "CompleteQueuedJob",
+        service="dynamodb",
+        action="updateItem",
+        iam_action="dynamodb:UpdateItem",
+        iam_resources=[table_arn],
+        parameters={
+            "TableName": table_name,
+            "Key": {"PK": {"S.$": "$.queue.PK"}, "SK": {"S.$": "$.queue.SK"}},
+            "UpdateExpression": "SET #status = :status",
+            "ExpressionAttributeNames": {"#status": "status"},
+            "ExpressionAttributeValues": {":status": {"S": "COMPLETED"}},
+        },
+        result_path=sfn.JsonPath.DISCARD,
+    )
+    check_queue = sfn.Choice(scope, "CheckQueueCompletion")
+    check_queue.when(
+        sfn.Condition.and_(
+            string("$.outcome.status", "ok"), sfn.Condition.is_present("$.queue")
+        ),
+        complete,
+    ).otherwise(result)
+    complete.next(result)
 
     launch.add_catch(no_vm, result_path="$.failure")
     for api in (get_vm, token, poll):
@@ -219,6 +262,7 @@ def definition(
     for api in (terminate, get_termination):
         api.add_catch(cleanup_failed, result_path="$.failure")
 
+    queued_start.next(launch)
     start.next(launch).next(check_launch)
     check_launch.when(string("$.vm.MicrovmId"), check_endpoint).otherwise(no_vm)
     check_endpoint.when(string("$.vm.Endpoint"), startup_wait).otherwise(failure)
@@ -248,7 +292,7 @@ def definition(
     success.next(terminate)
     failure.next(terminate)
     terminate.next(termination_wait).next(get_termination).next(terminated)
-    terminated.when(string("$.lifecycle.State", "TERMINATED"), result)
+    terminated.when(string("$.lifecycle.State", "TERMINATED"), check_queue)
     terminated.when(
         string("$.lifecycle.State", "TERMINATING"), termination_wait
     ).otherwise(cleanup_failed)
