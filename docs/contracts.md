@@ -60,6 +60,12 @@ acknowledges launch, not task success or confirmed termination.
 
 ## HTTP contract source
 
+The signed GitHub receiver's `/` POST boundary is also defined in
+[openapi.yaml](../openapi.yaml), under its own Function URL server. See
+[local webhook verification](github-webhook.md) for configuration, queue/Pipes
+handoffs, operational limits, and the known Floci lifecycle gaps. This addition
+does not change manual submission or worker interfaces.
+
 Read [openapi.yaml](../openapi.yaml) for lifecycle hooks, status polling,
 authentication, headers, request/response bodies, and the shared `Job` and
 `RunHookRequest` schemas. This document does not redefine them.

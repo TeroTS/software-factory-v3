@@ -1,8 +1,8 @@
 openapi: 3.1.0
 info:
-  title: Software factory PoC lifecycle and worker interface
-  version: 0.1.0
-  description: MicroVM lifecycle hooks and job status API.
+  title: Software factory PoC webhook, lifecycle, and worker interfaces
+  version: 0.2.0
+  description: Signed GitHub issue receipt, MicroVM lifecycle hooks, and job status API.
 servers:
   - url: https://{endpoint}
     description: AWS-managed endpoint returned at launch.
@@ -10,6 +10,100 @@ servers:
       endpoint:
         default: microvm-endpoint.example.invalid
 paths:
+  /:
+    servers:
+      - url: https://{functionUrlHost}
+        description: Public Lambda Function URL for GitHub deliveries; distinct from the MicroVM worker.
+        variables:
+          functionUrlHost:
+            default: receiver.lambda-url.us-east-1.example.invalid
+    post:
+      operationId: receiveIssue
+      summary: Request a pinned Job from a signed issue-opening delivery
+      description: 'Accept only issues/opened in the deployment-authorized repository, excluding PRs. Verify HMAC-SHA256 over the original HTTP body bytes (not reserialized JSON). Capture title and body, separated by two newlines when the body is nonempty; a null/empty body yields title only. Resolve the deployment-owned target branch to a full SHA with the existing scoped GitHub token, then enqueue the existing Job schema. Payload fields cannot select credentials or target configuration. Duplicate delivery may request duplicate/concurrent billable Jobs; receipt is not completion.'
+      security:
+        - GitHubSignature: []
+      parameters:
+        - name: X-GitHub-Event
+          in: header
+          required: true
+          schema:
+            type: string
+          description: Only issues requests work; other signed events are ignored.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action, repository, issue]
+              properties:
+                action:
+                  type: string
+                  description: Only opened requests work.
+                repository:
+                  type: object
+                  required: [full_name]
+                  properties:
+                    full_name:
+                      type: string
+                      description: Must exactly match deployment-owned repository authorization.
+                issue:
+                  type: object
+                  required: [title]
+                  properties:
+                    title:
+                      type: string
+                      minLength: 1
+                    body:
+                      type: [string, 'null']
+                    pull_request:
+                      description: Presence excludes this delivery from Job submission.
+              description: Additional GitHub fields are ignored; comments and later edits are not fetched. Prepared Job JSON must fit the existing 16 KiB worker limit.
+      responses:
+        '202':
+          description: Prepared Job acknowledged by SQS; not workflow startup, publication, or VM termination.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookReply'
+              example: {message: Job queued}
+        '200':
+          description: Signed but irrelevant event, action, or PR ignored; no Job queued.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookReply'
+        '400':
+          description: Malformed issue/body/task or oversized Job; no Job queued.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookReply'
+        '403':
+          description: Missing/invalid/tampered signature or unauthorized repository; no Job queued.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookReply'
+        '405':
+          description: POST required; no Job queued.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookReply'
+        '500':
+          description: Deployment configuration unavailable; no Job queued.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookReply'
+        '502':
+          description: GitHub/token/baseline resolution or SQS request failed. No incomplete Job is sent; an uncertain SQS acknowledgement may still have accepted a complete Job. No application retries.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookReply'
   /status:
     get:
       operationId: getStatus
@@ -114,6 +208,11 @@ paths:
           $ref: '#/components/responses/HookFailure'
 components:
   securitySchemes:
+    GitHubSignature:
+      type: apiKey
+      in: header
+      name: X-Hub-Signature-256
+      description: 'sha256=<lowercase hexadecimal HMAC-SHA256 of original body bytes>, using the deployment signing secret; compared in constant time. Authenticates GitHub delivery, not issue-author authority.'
     MicrovmProxyAuth:
       type: apiKey
       in: header
@@ -136,6 +235,14 @@ components:
       schema:
         type: string
   schemas:
+    WebhookReply:
+      type: object
+      additionalProperties: false
+      required: [message]
+      properties:
+        message:
+          type: string
+          description: Fixed diagnostic message; no task content, exception details, or credentials.
     Status:
       type: object
       additionalProperties: false

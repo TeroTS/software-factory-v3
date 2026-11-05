@@ -22,12 +22,14 @@ from aws_cdk import (
 from aws_cdk import (
     aws_logs as logs,
 )
+from aws_cdk import aws_pipes as pipes
 from aws_cdk import (
     aws_s3 as s3,
 )
 from aws_cdk import (
     aws_s3_assets as assets,
 )
+from aws_cdk import aws_sqs as sqs
 from aws_cdk import (
     aws_stepfunctions as sfn,
 )
@@ -88,6 +90,7 @@ class Image(Stack):
             ),
             **kwargs,
         )
+        self.artifact_bucket = artifact_bucket
         repository = CfnParameter(
             self,
             "AuthorizedRepository",
@@ -104,6 +107,8 @@ class Image(Stack):
             min_length=1,
             description="PR target branch in the authorized repository.",
         )
+        self.repository = repository.value_as_string
+        self.target_branch = target.value_as_string
         log_group = logs.LogGroup(
             self,
             "Logs",
@@ -234,7 +239,12 @@ class Workflow(Stack):
     # Pin is required at deploy; latest-active fallback is never selected automatically.
     def __init__(self, scope, construct_id, image, **kwargs):
         super().__init__(
-            scope, construct_id, synthesizer=CliCredentialsStackSynthesizer(), **kwargs
+            scope,
+            construct_id,
+            synthesizer=CliCredentialsStackSynthesizer(
+                file_assets_bucket_name=image.artifact_bucket, bucket_prefix="receiver/"
+            ),
+            **kwargs,
         )
         version = CfnParameter(
             self,
@@ -338,3 +348,82 @@ class Workflow(Stack):
         CfnOutput(self, "PinnedImageVersion", value=version.value_as_string)
         CfnOutput(self, "ExecutionRoleArn", value=role.role_arn)
         CfnOutput(self, "ConnectionArn", value=connection.attr_arn)
+        signing_secret = CfnParameter(
+            self,
+            "WebhookSigningSecret",
+            type="String",
+            no_echo=True,
+            min_length=1,
+            description="GitHub signing secret; supply privately, never in source or command history.",
+        )
+        dlq = sqs.Queue(self, "JobDeadLetters")
+        queue = sqs.Queue(
+            self,
+            "IssueJobs",
+            visibility_timeout=Duration.seconds(60),
+            dead_letter_queue=sqs.DeadLetterQueue(queue=dlq, max_receive_count=1),
+        )
+        receiver_logs = logs.LogGroup(
+            self, "ReceiverLogs", removal_policy=RemovalPolicy.RETAIN
+        )
+        receiver_role = iam.Role(
+            self,
+            "ReceiverRole",
+            assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
+        )
+        receiver_logs.grant_write(receiver_role)
+        receiver = lambda_.Function(
+            self,
+            "IssueReceiver",
+            runtime=lambda_.Runtime.PYTHON_3_13,
+            handler="handler.handle",
+            code=lambda_.Code.from_asset(
+                str(ROOT / "receiver"), exclude=["__pycache__", "*.pyc"]
+            ),
+            timeout=Duration.seconds(30),
+            log_group=receiver_logs,
+            role=receiver_role,
+            environment={
+                "AUTHORIZED_REPOSITORY": image.repository,
+                "PR_TARGET_BRANCH": image.target_branch,
+                "GITHUB_SECRET_ARN": SECRET,
+                "WEBHOOK_SECRET": signing_secret.value_as_string,
+                "JOB_QUEUE_URL": queue.queue_url,
+            },
+        )
+        queue.grant_send_messages(receiver)
+        receiver.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["secretsmanager:GetSecretValue"], resources=[SECRET]
+            )
+        )
+        url = receiver.add_function_url(auth_type=lambda_.FunctionUrlAuthType.NONE)
+        pipe_role = iam.Role(
+            self,
+            "IssuePipeRole",
+            assumed_by=iam.ServicePrincipal("pipes.amazonaws.com"),
+        )
+        queue.grant_consume_messages(pipe_role)
+        machine.grant_start_execution(pipe_role)
+        pipe = pipes.CfnPipe(
+            self,
+            "IssuePipe",
+            role_arn=pipe_role.role_arn,
+            source=queue.queue_arn,
+            target=machine.state_machine_arn,
+            source_parameters=pipes.CfnPipe.PipeSourceParametersProperty(
+                sqs_queue_parameters=pipes.CfnPipe.PipeSourceSqsQueueParametersProperty(
+                    batch_size=1
+                )
+            ),
+            target_parameters=pipes.CfnPipe.PipeTargetParametersProperty(
+                input_template="<$.body>",
+                step_function_state_machine_parameters=pipes.CfnPipe.PipeTargetStateMachineParametersProperty(
+                    invocation_type="FIRE_AND_FORGET"
+                ),
+            ),
+        )
+        pipe.node.add_dependency(pipe_role)
+        CfnOutput(self, "WebhookUrl", value=url.url)
+        CfnOutput(self, "JobQueueUrl", value=queue.queue_url)
+        CfnOutput(self, "JobDeadLetterQueueUrl", value=dlq.queue_url)

@@ -39,6 +39,128 @@ class InfrastructureTests(unittest.TestCase):
             main()
         self.assertTrue((entry / "manifest.json").is_file())
 
+    def test_signed_webhook_queue_and_async_pipe_reuse_standard_workflow(self):
+        template = self.workflow_template
+        template.resource_count_is("AWS::Lambda::Function", 1)
+        template.has_resource_properties("AWS::Lambda::Url", {"AuthType": "NONE"})
+        template.resource_count_is("AWS::SQS::Queue", 2)
+        template.has_resource_properties(
+            "AWS::SQS::Queue",
+            {
+                "RedrivePolicy": {
+                    "maxReceiveCount": 1,
+                    "deadLetterTargetArn": Match.any_value(),
+                }
+            },
+        )
+        template.has_resource_properties(
+            "AWS::Pipes::Pipe",
+            {
+                "SourceParameters": {"SqsQueueParameters": {"BatchSize": 1}},
+                "Target": {"Ref": "Workflow"},
+                "TargetParameters": {
+                    "InputTemplate": "<$.body>",
+                    "StepFunctionStateMachineParameters": {
+                        "InvocationType": "FIRE_AND_FORGET"
+                    },
+                },
+            },
+        )
+        template.has_resource_properties(
+            "AWS::Lambda::Function",
+            {
+                "Environment": {
+                    "Variables": {
+                        "AUTHORIZED_REPOSITORY": Match.any_value(),
+                        "PR_TARGET_BRANCH": Match.any_value(),
+                        "GITHUB_SECRET_ARN": Match.any_value(),
+                        "WEBHOOK_SECRET": {"Ref": "WebhookSigningSecret"},
+                        "JOB_QUEUE_URL": Match.any_value(),
+                    }
+                }
+            },
+        )
+        secret = template.to_json()["Parameters"]["WebhookSigningSecret"]
+        self.assertTrue(secret["NoEcho"])
+        self.assertNotIn("Default", secret)
+        text = json.dumps(template.to_json())
+        self.assertNotIn("AWS::SecretsManager::Secret", text)
+        self.assertNotIn('"Resource": "*"', text)
+        self.assertNotIn("states:StartSyncExecution", text)
+        self.assertIn("sqs:SendMessage", text)
+        self.assertIn("sqs:ReceiveMessage", text)
+        self.assertIn("sqs:DeleteMessage", text)
+        self.assertIn("states:StartExecution", text)
+        self.assertIn("pipes.amazonaws.com", text)
+        self.assertNotIn("AWSLambdaBasicExecutionRole", text)
+        self.assertNotIn("LOCAL_AWS_ENDPOINT", text)
+        self.assertNotIn("LOCAL_GITHUB_ENDPOINT", text)
+        template.has_resource_properties(
+            "AWS::Lambda::Function",
+            {
+                "Environment": {
+                    "Variables": {
+                        "AUTHORIZED_REPOSITORY": self.workflow.resolve(
+                            self.image.repository
+                        ),
+                        "PR_TARGET_BRANCH": self.workflow.resolve(
+                            self.image.target_branch
+                        ),
+                    }
+                }
+            },
+        )
+        function = next(
+            iter(template.find_resources("AWS::Lambda::Function").values())
+        )["Properties"]
+        pipe = next(iter(template.find_resources("AWS::Pipes::Pipe").values()))[
+            "Properties"
+        ]
+        role_scopes = {
+            function["Role"]["Fn::GetAtt"][0]: {
+                "secretsmanager:GetSecretValue": "arn:aws:secretsmanager:us-east-1:172318459814:secret:software-factory-poc/github-token-sXayGQ",
+                "sqs:SendMessage": pipe["Source"],
+                "sqs:GetQueueAttributes": pipe["Source"],
+                "sqs:GetQueueUrl": pipe["Source"],
+            },
+            pipe["RoleArn"]["Fn::GetAtt"][0]: {
+                "sqs:ReceiveMessage": pipe["Source"],
+                "sqs:DeleteMessage": pipe["Source"],
+                "sqs:ChangeMessageVisibility": pipe["Source"],
+                "sqs:GetQueueAttributes": pipe["Source"],
+                "sqs:GetQueueUrl": pipe["Source"],
+                "states:StartExecution": pipe["Target"],
+            },
+        }
+        for role_id, expected in role_scopes.items():
+            actual = {}
+            for policy in template.find_resources("AWS::IAM::Policy").values():
+                properties = policy["Properties"]
+                if {"Ref": role_id} not in properties.get("Roles", []):
+                    continue
+                for statement in properties["PolicyDocument"]["Statement"]:
+                    actions = statement["Action"]
+                    for action in [actions] if isinstance(actions, str) else actions:
+                        if not action.startswith("logs:"):
+                            actual[action] = statement["Resource"]
+            self.assertEqual(actual, expected)
+        template.has_resource_properties(
+            "AWS::Lambda::Permission",
+            {
+                "Action": "lambda:InvokeFunctionUrl",
+                "Principal": "*",
+                "FunctionUrlAuthType": "NONE",
+            },
+        )
+        template.has_resource_properties(
+            "AWS::Lambda::Permission",
+            {
+                "Action": "lambda:InvokeFunction",
+                "Principal": "*",
+                "InvokedViaFunctionUrl": True,
+            },
+        )
+
     # Checks private artifact storage and the native ARM64 image configuration,
     # protecting the approved Gate 2 design from custom providers or helper Lambdas.
     def test_native_image_full_configuration_and_private_artifacts(self):
@@ -105,12 +227,13 @@ class InfrastructureTests(unittest.TestCase):
                     for resource in resources.values()
                 )
             )
-            self.assertFalse(
-                any(
-                    resource["Type"] == "AWS::Lambda::Function"
-                    for resource in resources.values()
+            if stack is not self.workflow:
+                self.assertFalse(
+                    any(
+                        resource["Type"] == "AWS::Lambda::Function"
+                        for resource in resources.values()
+                    )
                 )
-            )
 
     def test_repository_authorization_and_target_are_deployment_controlled(self):
         template = self.image_template.to_json()
@@ -263,7 +386,12 @@ class InfrastructureTests(unittest.TestCase):
             },
         )
         roles = self.workflow_template.find_resources("AWS::IAM::Role")
-        role = next(iter(roles.values()))["Properties"]
+        role = next(
+            role["Properties"]
+            for role in roles.values()
+            if "states.amazonaws.com"
+            in json.dumps(role["Properties"]["AssumeRolePolicyDocument"])
+        )
         self.assertIn(
             "states.amazonaws.com", json.dumps(role["AssumeRolePolicyDocument"])
         )

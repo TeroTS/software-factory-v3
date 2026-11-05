@@ -1,4 +1,4 @@
-.PHONY: setup format format-check lint test coverage dev verify synth preflight
+.PHONY: setup format format-check lint test coverage dev verify synth preflight floci-up floci-test floci-down
 
 setup:
 	uv sync --locked
@@ -27,6 +27,16 @@ verify: format-check lint coverage dev
 
 synth:
 	npm run synth -- --quiet
+
+# Local-only SDK tests use fixed loopback/Docker endpoints and explicit test credentials.
+floci-up:
+	docker compose -f compose.floci.yaml up -d --wait --wait-timeout 90
+
+floci-test: floci-up
+	FACTORY_FLOCI_TEST=1 uv run --locked python -m unittest discover -s tests -p test_floci.py -v
+
+floci-down:
+	docker compose -f compose.floci.yaml down
 
 # Outer Docker seccomp permits nested namespaces; Codex's own sandbox stays enabled.
 preflight:

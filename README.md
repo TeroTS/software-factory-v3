@@ -34,9 +34,19 @@ checks Python formatting, lint, tests through coverage.
 | `make verify` | Run formatting checks, lint, coverage/tests, and logging. |
 | `make synth` | Synthesize native CDK templates/assets locally; no deployment. |
 | `make preflight` | Build the ARM64 image and check real sandbox/search/edit/tests/Git plus simulated-service worker/lifecycle tests. |
+| `make floci-test` | Run local signed-webhook/SQS/Pipes/Standard tests and report known MicroVM lifecycle gaps; requires Docker. |
+| `make floci-down` | Stop the task-local emulator and GitHub fixture containers. |
 
 The separate demonstration repository,
 [TeroTS/factory-smoke-test](https://github.com/TeroTS/factory-smoke-test).
+
+### Local GitHub issue integration
+
+See [webhook configuration and local verification](docs/github-webhook.md).
+The receiver and queue/Pipes wiring are implemented, but Floci 2.4.0 cannot run
+the existing MicroVM lifecycle. A passing `make floci-test` does **not** mean a
+successful end-to-end Job; `make verify` skips these Docker-only tests. Live
+deployment/webhook setup is deferred, including private signing-secret input.
 
 ### Live AWS/GitHub happy-path test
 
@@ -84,6 +94,7 @@ never merges.
   local commands, configuration, and pinned development dependencies.
 - `tools/`: non-production development smoke check.
 - `tests/`: standard-library worker/lifecycle/infrastructure tests.
+- `receiver/`: signed GitHub issue receiver; queues pinned Jobs without changing worker interfaces.
 - `worker/`: snapshot-safe lifecycle HTTP server, asynchronous worker, and
   command/source/publication evidence verification.
 - `image/`: package-managed ARM64 Dockerfile and fixed demonstration acceptance.
