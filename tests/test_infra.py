@@ -59,7 +59,7 @@ class InfrastructureTests(unittest.TestCase):
                 "SourceParameters": {"SqsQueueParameters": {"BatchSize": 1}},
                 "Target": {"Ref": "Workflow"},
                 "TargetParameters": {
-                    "InputTemplate": "<$.body>",
+                    "InputTemplate": '{"repository": <$.body.repository>, "baseSha": <$.body.baseSha>, "task": <$.body.task>}',
                     "StepFunctionStateMachineParameters": {
                         "InvocationType": "FIRE_AND_FORGET"
                     },

@@ -3,6 +3,7 @@
 ## Repository Overview
 
 This is an operator-led AWS Lambda MicroVM software factory PoC.
+Never update README.md or AGENTS.md with ticket implementation related info. 
 
 ## Repository Structure
 

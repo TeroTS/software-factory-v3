@@ -21,7 +21,7 @@ class LiveToolsTests(unittest.TestCase):
             "task": "Change greeting and tests",
         }
         self.job_file = Path(self.directory.name) / "job.json"
-        self.job_file.write_text(json.dumps(self.job))
+        self.job_file.write_text(json.dumps([self.job]))
         self.arn = "arn:aws:states:us-east-1:172318459814:execution:software-factory-poc:fixed-name"
         self.output = {
             "microvmId": "microvm-test",
@@ -377,6 +377,22 @@ class LiveToolsTests(unittest.TestCase):
         )
         self.assertNotIn("terminate_microvm", [op for op, p in self.requests])
 
+    def test_submission_requires_exactly_one_job_object_before_aws_calls(self):
+        for submission in (
+            self.job,
+            [],
+            [self.job, self.job],
+            [None],
+            [[self.job]],
+            None,
+            0,
+        ):
+            with self.subTest(submission=submission):
+                self.job_file.write_text(json.dumps(submission))
+                with self.assertRaisesRegex(ValueError, "exactly one Job object"):
+                    self.run_job(existing=False)
+                self.assertEqual(self.requests, [])
+
     def test_resume_existing_execution_never_submits_again(self):
         self.run_job()
         self.assertNotIn("start_execution", [op for op, p in self.requests])
@@ -403,7 +419,7 @@ class LiveToolsTests(unittest.TestCase):
 
     def test_unauthorized_job_stops_before_submission(self):
         self.job_file.write_text(
-            json.dumps({**self.job, "repository": "other/repository"})
+            json.dumps([{**self.job, "repository": "other/repository"}])
         )
         with self.assertRaises(ValueError):
             self.run_job(existing=False)
@@ -706,7 +722,7 @@ class LiveToolsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "16 KB"):
             self.run_job(existing=False)
         self.assertEqual(self.requests, [])
-        self.job_file.write_text(json.dumps(self.job))
+        self.job_file.write_text(json.dumps([self.job]))
         self.execution["output"] = json.dumps({**self.output, "microvmId": "other"})
         with self.assertRaisesRegex(ValueError, "Final output"):
             self.run_job()
@@ -718,7 +734,7 @@ class LiveToolsTests(unittest.TestCase):
     def test_baseline_mismatch_and_describe_access_error_never_submit(self):
         from botocore.exceptions import ClientError
 
-        self.job_file.write_text(json.dumps({**self.job, "baseSha": "c" * 40}))
+        self.job_file.write_text(json.dumps([{**self.job, "baseSha": "c" * 40}]))
         with self.assertRaisesRegex(ValueError, "baseline"):
             self.run_job(existing=False)
         self.assertNotIn("start_execution", [op for op, p in self.requests])

@@ -185,7 +185,7 @@ class FlociTests(test_workflow.WorkflowFixture):
             DesiredState="STOPPED",
             SourceParameters={"SqsQueueParameters": {"BatchSize": 1}},
             TargetParameters={
-                "InputTemplate": "<$.body>",
+                "InputTemplate": '{"repository": <$.body.repository>, "baseSha": <$.body.baseSha>, "task": <$.body.task>}',
                 "StepFunctionStateMachineParameters": {
                     "InvocationType": "FIRE_AND_FORGET"
                 },
@@ -267,7 +267,7 @@ class FlociTests(test_workflow.WorkflowFixture):
             "Messages", []
         )
 
-    def test_signed_post_queues_pinned_job_and_pipe_starts_unchanged_workflow(self):
+    def test_signed_post_queues_job_and_reports_floci_batching_gap(self):
         self.assertEqual(self.post(binary=True), 202)
         message = self.wait_for(lambda: self.messages(self.queue))[0]
         self.assertEqual(json.loads(message["Body"]), self.job)
@@ -281,25 +281,23 @@ class FlociTests(test_workflow.WorkflowFixture):
             lambda: self.sfn.list_executions(stateMachineArn=self.machine)["executions"]
         )[0]
         outcome = self.wait_for(lambda: self.finished(execution["executionArn"]))
+        # Floci 2.4.0 incorrectly omits AWS's singleton-array wrapper; this is a gap, not valid input.
         self.assertEqual(json.loads(outcome["input"]), self.job)
         self.assertEqual(outcome["status"], "FAILED")
+        self.assertEqual(outcome["error"], "InvalidSubmission")
+        self.assertEqual(
+            outcome["cause"],
+            "Workflow input must be an array containing exactly one Job object.",
+        )
         history = self.sfn.get_execution_history(
             executionArn=execution["executionArn"]
         )["events"]
-        self.assertIn("LaunchVM", json.dumps(history, default=str))
-        failures = [
-            item["taskFailedEventDetails"]
-            for item in history
-            if item["type"] == "TaskFailed"
-        ]
-        self.assertEqual(len(failures), 1)
-        self.assertEqual(
-            failures[0]["cause"],
-            "Unsupported resource: arn:aws:states:::aws-sdk:lambdamicrovms:runMicrovm",
+        self.assertNotIn("LaunchVM", json.dumps(history, default=str))
+        self.assertFalse(any(item["type"] == "TaskScheduled" for item in history))
+        print(
+            "Floci batching gap: direct object instead of [Job]; workflow correctly rejects it."
         )
-        print("Floci launch failure:", failures[0])
-        # This is a compatibility observation, NOT successful worker/publication/termination evidence.
-        print("Floci lifecycle gap:", outcome.get("error"), outcome.get("cause"))
+        # The opt-in AWS regression verifies actual batching, JSON escaping, and entry behavior.
         self.assertFalse(
             self.messages(self.dlq),
             "Acknowledged startup must not DLQ a later workflow failure",

@@ -178,12 +178,21 @@ def inspect_publication(session, vm_id, version, job, target):
     return "https://github.com/" + repository + "/pull/" + number
 
 
-# Reuse one explicit execution identity; even uncertain acknowledgements never trigger another submission.
+# Submit/observe one singleton-array Job using a fixed identity; invalid envelopes and uncertain acknowledgements never trigger retries.
 def execute(session, name, job_file):
     payload = job_file.read_text()
     if len(payload.encode("utf-8")) > 16384:
         raise live.OperatorError("Job exceeds 16 KB")
-    job = json.loads(payload)
+    submission = json.loads(payload)
+    if (
+        not isinstance(submission, list)
+        or len(submission) != 1
+        or not isinstance(submission[0], dict)
+    ):
+        raise live.OperatorError(
+            "Workflow input must be an array containing exactly one Job object"
+        )
+    job = submission[0]
     arn = live.MACHINE_ARN.replace(":stateMachine:", ":execution:") + ":" + name
     print("Retain execution ARN: " + arn, flush=True)
     print(
@@ -213,7 +222,14 @@ def execute(session, name, job_file):
                 for key in ("AUTHORIZED_REPOSITORY", "PR_TARGET_BRANCH")
             }
         )
-        parse_job({"microvmId": "operator-validation", "runHookPayload": payload})
+        parse_job(
+            {
+                "microvmId": "operator-validation",
+                "runHookPayload": json.dumps(
+                    job, ensure_ascii=False, separators=(",", ":")
+                ),
+            }
+        )
         base = live.output(
             "gh",
             "api",

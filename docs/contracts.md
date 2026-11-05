@@ -1,14 +1,9 @@
 # Interface Contracts
 
-Source: [SPEC.md](../SPEC.md).
 
 AWS-owned submission mappings and the target-repository script boundary for the
 software factory PoC. Our HTTP interfaces and shared payload schemas are defined
-**only in [openapi.yaml](../openapi.yaml)**. Behavior and gate requirements remain
-in [SPEC.md](../SPEC.md) and [DECISIONS.md](../DECISIONS.md).
-These are accepted target contracts, not proof of implementation or live
-verification. Implementation and verification
-evidence belong in [the current slice](slices/current-slice.md).
+**only in [openapi.yaml](../openapi.yaml)**.
 
 ## Operator → Step Functions: start a job
 
@@ -24,7 +19,7 @@ Full AWS contract: [StartExecution](https://docs.aws.amazon.com/step-functions/l
 | --- | --- | --- |
 | `stateMachineArn` | string | ARN of the deployed Step Functions Standard state machine. |
 | `name` | string | Operator-chosen execution name; also used as the VM launch client token. |
-| `input` | string | JSON serialization of `openapi.yaml#/components/schemas/Job`, not an embedded object. |
+| `input` | string | JSON serialization of `openapi.yaml#/components/schemas/WorkflowSubmission`: an array containing exactly one Job, not an embedded object. |
 
 ### Response
 
@@ -61,14 +56,7 @@ acknowledges launch, not task success or confirmed termination.
 ## HTTP contract source
 
 The signed GitHub receiver's `/` POST boundary is also defined in
-[openapi.yaml](../openapi.yaml), under its own Function URL server. See
-[local webhook verification](github-webhook.md) for configuration, queue/Pipes
-handoffs, operational limits, and the known Floci lifecycle gaps. This addition
-does not change manual submission or worker interfaces.
-
-Read [openapi.yaml](../openapi.yaml) for lifecycle hooks, status polling,
-authentication, headers, request/response bodies, and the shared `Job` and
-`RunHookRequest` schemas. This document does not redefine them.
+[openapi.yaml](../openapi.yaml), under its own Function URL server.
 
 ## Worker / Codex → authorized target repository: setup and verification
 
@@ -128,7 +116,7 @@ No allowlist, multi-repository token, or Job-supplied authorization is defined.
 | Agent-side test failure | Codex diagnoses, fixes, and reruns failing verification within its one invocation; no agent restart or whole-Job rerun. |
 | Completion | Independent final verification with actual exit code `0`, nonempty committed changes descended from pinned `baseSha`, clean workspace, matching local/remote/PR task heads, and exactly one open unmerged PR targeting the configured branch are required. The target branch may advance during the Job; its current head need not equal `baseSha`. |
 | Automated limits | The worker does not check calculator behavior, preserve baseline ASTs, or validate command chronology. It instructs Codex to verify before publication, but independent verification afterward does not prove that ordering or protect against weakened tests. Human GitHub review judges correctness and test adequacy; success does not authorize merging or establish compatibility with the current target branch. Compatibility remains a merge-time check; no GitHub merge-policy change is implied. |
-| Repository authorization | Read `openapi.yaml#/components/schemas/Job`; supplying a repository string does not grant access. Script code can access runtime credentials. Another repository requires explicit trust/scoping review under [DECISIONS.md](../DECISIONS.md#data--state--ownership-decisions); existing credentials must not silently gain broader scope. |
+| Repository authorization | Read `openapi.yaml#/components/schemas/Job`. |
 
 ## Sequence diagrams
 
@@ -136,9 +124,3 @@ No allowlist, multi-repository token, or Job-supplied authorization is defined.
 | --- | --- |
 | Image creation: one snapshot per image version | [Image-build sequence](diagrams/key_flow_image_build.svg) |
 | Job launch, polling, termination: reuse the pinned snapshot | [Job-lifecycle sequence](diagrams/key_flow_job_lifecycle.svg) |
-
-## Slice Handoff
-
-`$lean-story-delivery` must read [openapi.yaml](../openapi.yaml) and this file,
-then list relevant artifacts under `## Contract Inputs` in
-`docs/slices/current-slice.md` for the selected `SPEC.md` story.

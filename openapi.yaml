@@ -266,6 +266,13 @@ components:
           contentSchema:
             $ref: '#/components/schemas/Job'
           description: JSON-serialized Job string; maximum 16 KB in UTF-8.
+    WorkflowSubmission:
+      type: array
+      minItems: 1
+      maxItems: 1
+      items:
+        $ref: '#/components/schemas/Job'
+      description: The only Step Functions submission format for manual and Pipe callers. The workflow unwraps one Job for the worker; direct objects and other batch sizes are rejected before VM launch.
     Job:
       type: object
       additionalProperties: false

@@ -126,7 +126,7 @@ class JobOutcomeTests(test_worker.WorkerFixture, test_workflow.WorkflowFixture):
                     "TerminateVM": terminate,
                     "GetTerminationState": confirm,
                 },
-                job=self.job,
+                job=[self.job],
             )
         success = scenario == "success"
         expected_status = "ok" if success else "error"

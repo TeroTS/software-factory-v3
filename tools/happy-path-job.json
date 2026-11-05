@@ -1,5 +1,7 @@
-{
-  "repository": "TeroTS/factory-smoke-test",
-  "baseSha": "REPLACE_WITH_REVIEWED_FULL_COMMIT_SHA",
-  "task": "Add multiply(a, b) and tests for positive, negative, and zero operands while preserving addition behavior. Do not modify deployment configuration."
-}
+[
+  {
+    "repository": "TeroTS/factory-smoke-test",
+    "baseSha": "REPLACE_WITH_REVIEWED_FULL_COMMIT_SHA",
+    "task": "Add multiply(a, b) and tests for positive, negative, and zero operands while preserving addition behavior. Do not modify deployment configuration."
+  }
+]

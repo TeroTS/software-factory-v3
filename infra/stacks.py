@@ -417,7 +417,8 @@ class Workflow(Stack):
                 )
             ),
             target_parameters=pipes.CfnPipe.PipeTargetParametersProperty(
-                input_template="<$.body>",
+                # Bare body substitution strips JSON quotes; object fields preserve escaping within AWS's batch.
+                input_template='{"repository": <$.body.repository>, "baseSha": <$.body.baseSha>, "task": <$.body.task>}',
                 step_function_state_machine_parameters=pipes.CfnPipe.PipeTargetStateMachineParametersProperty(
                     invocation_type="FIRE_AND_FORGET"
                 ),

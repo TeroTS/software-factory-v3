@@ -31,11 +31,28 @@ def string(path, value=None):
     )
 
 
-# Return a connected launch/poll/shared-termination chain; the stack owns timeout and permissions.
+# Validate one-Job workflow submissions, then launch/poll/terminate; reject bad envelopes before VM creation.
 def definition(
     scope, image_arn, image_version, runtime_role, connection_arn, log_group
 ):
-    start = sfn.Pass(scope, "Input", parameters={"job.$": "$"})
+    # Pipes always batches; require the same singleton-array envelope for every caller.
+    submission = sfn.Choice(
+        scope, "CheckSubmission", query_language=sfn.QueryLanguage.JSONATA
+    )
+    invalid = sfn.Fail(
+        scope,
+        "InvalidSubmission",
+        error="InvalidSubmission",
+        cause="Workflow input must be an array containing exactly one Job object.",
+    )
+    start = sfn.Pass(scope, "Input", parameters={"job.$": "$[0]"})
+    submission.when(
+        sfn.Condition.jsonata(
+            "{% $type($states.input) = 'array' and $count($states.input) = 1 "
+            "and $type($states.input[0]) = 'object' %}"
+        ),
+        start,
+    ).otherwise(invalid)
     failed = sfn.Fail(scope, "JobFailed", error_path="$.error", cause_path="$.cause")
     succeeded = sfn.Succeed(scope, "JobSucceeded")
     no_vm = sfn.Pass(
@@ -237,4 +254,4 @@ def definition(
     ).otherwise(cleanup_failed)
     result.next(outcome)
     outcome.when(string("$.status", "ok"), succeeded).otherwise(job_failed)
-    return start
+    return submission

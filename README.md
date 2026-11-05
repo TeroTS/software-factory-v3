@@ -40,20 +40,7 @@ checks Python formatting, lint, tests through coverage.
 The separate demonstration repository,
 [TeroTS/factory-smoke-test](https://github.com/TeroTS/factory-smoke-test).
 
-### Local GitHub issue integration
-
-See [webhook configuration and local verification](docs/github-webhook.md).
-The receiver and queue/Pipes wiring are implemented, but Floci 2.4.0 cannot run
-the existing MicroVM lifecycle. A passing `make floci-test` does **not** mean a
-successful end-to-end Job; `make verify` skips these Docker-only tests. Live
-deployment/webhook setup is deferred, including private signing-secret input.
-
-### Live AWS/GitHub happy-path test
-
-Requires completed Gate 1, explicit operator approval, Docker, authenticated
-`gh`, and AWS profile `AWSAdministratorAccess-172318459814` in `us-east-1`.
-This deploys resources and runs a billable model/publication Job. From the
-repository root, run one stage at a time and review each confirmation:
+### Live AWS/GitHub test
 
 ```sh
 uv run --locked python -m tools.validate_deploy_image

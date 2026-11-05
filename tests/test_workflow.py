@@ -17,8 +17,8 @@ class TaskError(Exception):
 def lookup(data, path, context):
     if path.startswith("$$"):
         data, path = context, "$" + path[2:]
-    for key in re.findall(r"\.([\w-]+)|\['([^']+)'\]", path):
-        data = data[key[0] or key[1]]
+    for key, quoted, index in re.findall(r"\.([\w-]+)|\['([^']+)'\]|\[(\d+)\]", path):
+        data = data[int(index) if index else key or quoted]
     return data
 
 
@@ -47,6 +47,13 @@ def parameters(value, data, context):
 
 
 def choice(rule, data, context):
+    if "Condition" in rule:
+        # Model only this predicate; the opt-in AWS test executes the real JSONata state.
+        assert rule["Condition"] == (
+            "{% $type($states.input) = 'array' and $count($states.input) = 1 "
+            "and $type($states.input[0]) = 'object' %}"
+        )
+        return isinstance(data, list) and len(data) == 1 and isinstance(data[0], dict)
     if "And" in rule:
         return all(choice(item, data, context) for item in rule["And"])
     if "Or" in rule:
@@ -55,7 +62,7 @@ def choice(rule, data, context):
         return not choice(rule["Not"], data, context)
     try:
         value = lookup(data, rule["Variable"], context)
-    except (KeyError, TypeError):
+    except (KeyError, TypeError, IndexError):
         return rule.get("IsPresent") is False
     if "IsPresent" in rule:
         return rule["IsPresent"]
@@ -70,11 +77,13 @@ def simulate(definition, replies, limit=100, job=None):
     data = (
         job
         if job is not None
-        else {
-            "repository": "example/authorized-project",
-            "baseSha": "a" * 40,
-            "task": "Update greeting and tests",
-        }
+        else [
+            {
+                "repository": "example/authorized-project",
+                "baseSha": "a" * 40,
+                "task": "Update greeting and tests",
+            }
+        ]
     )
     context = {"Execution": {"Name": "same-execution"}}
     state = definition["StartAt"]
@@ -87,7 +96,7 @@ def simulate(definition, replies, limit=100, job=None):
         step = definition["States"][state]
         kind = step["Type"]
         if kind in ("Succeed", "Fail"):
-            if kind == "Fail":
+            if kind == "Fail" and "ErrorPath" in step:
                 # Fail paths must resolve on the shaped, token-free terminal state.
                 expression(step["ErrorPath"], data, context)
                 expression(step["CausePath"], data, context)
@@ -183,7 +192,8 @@ class WorkflowFixture(unittest.TestCase):
 class WorkflowTests(WorkflowFixture):
     def test_simplified_plan_uses_fresh_polls_and_shared_termination(self):
         states = self.definition["States"]
-        self.assertEqual(self.definition["StartAt"], "Input")
+        self.assertEqual(self.definition["StartAt"], "CheckSubmission")
+        self.assertEqual(states["Input"]["Parameters"], {"job.$": "$[0]"})
         self.assertEqual(states["Input"]["Next"], "LaunchVM")
         self.assertIn("reason", states["RecordFailure"].get("Parameters", {}))
         for obsolete in (
@@ -385,6 +395,32 @@ class WorkflowTests(WorkflowFixture):
                 self.assertNotIn("termination", output)
                 self.assertNotIn("secret-jwe", json.dumps(output))
 
+    def test_workflow_rejects_non_singleton_submissions_before_launch(self):
+        job = {"repository": "example/fixture", "baseSha": "a" * 40, "task": "Change"}
+        for submission in (
+            job,
+            [],
+            [job, job],
+            [None],
+            ["task"],
+            [[job]],
+            {},
+            0,
+            "task",
+        ):
+            with self.subTest(submission=submission):
+                kind, _, calls, final = simulate(
+                    self.definition, self.replies, job=submission
+                )
+                self.assertEqual((kind, final), ("Fail", "InvalidSubmission"))
+                self.assertEqual(calls, [])
+        self.assertEqual(
+            self.definition["States"]["CheckSubmission"]["QueryLanguage"], "JSONata"
+        )
+        self.assertEqual(
+            self.definition["States"]["CheckSubmission"]["Default"], "InvalidSubmission"
+        )
+
     def test_invalid_job_is_forwarded_to_worker_without_changing_contract(self):
         job = {"repository": "unauthorized/project", "baseSha": "bad", "task": ""}
         kind, output, calls, _ = simulate(
@@ -395,7 +431,7 @@ class WorkflowTests(WorkflowFixture):
                     {"StatusCode": 200, "ResponseBody": {"status": "error"}}
                 ],
             },
-            job=job,
+            job=[job],
         )
         self.assertEqual(kind, "Fail")
         self.assertEqual(json.loads(calls[0][1]["RunHookPayload"]), job)
