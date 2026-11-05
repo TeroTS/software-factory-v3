@@ -3,12 +3,6 @@
 ## Repository Overview
 
 This is an operator-led AWS Lambda MicroVM software factory PoC.
-Never write implementation progress or verification evidence to any file during
-the implementation of a story. After implementation is ready, record short 
-implementation summary to [docs/slices/current-slice.md](docs/slices/current-slice.md).
-
-Read [DECISIONS.md](DECISIONS.md) for accepted decisions,
-[SPEC.md](SPEC.md) for behavior and stories, and [README.md](README.md) for onboarding.
 
 ## Repository Structure
 
@@ -21,7 +15,6 @@ Read [DECISIONS.md](DECISIONS.md) for accepted decisions,
 - `Makefile`: shared setup and verification commands.
 - `pyproject.toml`, `uv.lock`, `.python-version`: tooling configuration, pinned
   development dependencies, and local Python selection.
-- `DECISIONS.md`, `CONTEXT.md`: accepted behavior and canonical naming.
 - `docs/plans/`: proposed architecture and gate documentation.
 - `docs/aws-lambda-microvms/`: copied AWS reference documentation.
 
@@ -50,17 +43,6 @@ make format
 make synth
 make preflight
 ```
-
-## Domain Vocabulary
-
-- Read `CONTEXT.md` before naming domain concepts.
-- Use its canonical terms consistently in code, tests, documentation, and
-  user-facing output.
-- Resolve terminology conflicts before adding or renaming terms.
-- Treat the accepted specification as authoritative for behavior and
-  `CONTEXT.md` as authoritative for naming.
-- Preserve public-interface compatibility; do not silently rename established
-  CLI, JSON, or API fields.
 
 ## Commenting Convention
 
