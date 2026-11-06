@@ -375,9 +375,29 @@ class InfrastructureTests(unittest.TestCase):
                 "src/worker/__init__.py",
                 "src/worker/server.py",
                 "src/worker/task.py",
+                "image/skills/implement/SKILL.md",
+                "image/skills/implement/agents/openai.yaml",
+                "image/skills/code-review/SKILL.md",
+                "image/skills/code-review/agents/openai.yaml",
+                "image/skills/pr/SKILL.md",
+                "image/skills/pr/CREDITS.md",
+                "image/skills/pr/agents/openai.yaml",
+                "image/skills/tdd/SKILL.md",
+                "image/skills/tdd/tests.md",
+                "image/skills/tdd/mocking.md",
+                "image/skills/tdd/agents/openai.yaml",
+                "image/skills/codebase-design/SKILL.md",
+                "image/skills/codebase-design/DEEPENING.md",
+                "image/skills/codebase-design/DESIGN-IT-TWICE.md",
+                "image/skills/codebase-design/agents/openai.yaml",
             },
         )
         root = Path(__file__).resolve().parents[2]
+        for path in (staged / "image/skills").rglob("*"):
+            if path.is_file():
+                self.assertEqual(
+                    path.read_bytes(), (root / path.relative_to(staged)).read_bytes()
+                )
         self.assertEqual(
             (staged / "image/managed_config.toml").read_bytes(),
             (root / "image/managed_config.toml").read_bytes(),

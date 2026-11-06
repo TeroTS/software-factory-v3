@@ -1,5 +1,6 @@
 import json
 import os
+import pwd
 import subprocess
 import sys
 import tempfile
@@ -14,8 +15,11 @@ from pathlib import Path
     "Real Linux sandbox is checked by make preflight",
 )
 class SandboxTests(unittest.TestCase):
-    # Read real pinned-Codex layers without contacting a model; bound the process even on bad output.
-    def read_config(self, root, home, overrides=()):
+    # Query the real pinned CLI without model access; bound the process even on bad output.
+    def read_app_server(
+        self, root, home, overrides=(), method="config/read", params=None
+    ):
+        (home / ".codex").mkdir(exist_ok=True)
         with tempfile.TemporaryFile(mode="w+") as errors:
             process = subprocess.Popen(
                 ["codex", *overrides, "app-server", "--listen", "stdio://"],
@@ -45,11 +49,10 @@ class SandboxTests(unittest.TestCase):
                     },
                     {
                         "id": 2,
-                        "method": "config/read",
-                        "params": {
-                            "includeLayers": True,
-                            "cwd": str(root),
-                        },
+                        "method": method,
+                        "params": params
+                        if params is not None
+                        else {"includeLayers": True, "cwd": str(root)},
                     },
                 ):
                     process.stdin.write(json.dumps(request) + "\n")
@@ -62,9 +65,7 @@ class SandboxTests(unittest.TestCase):
                             break
                     else:
                         errors.seek(0)
-                        self.fail(
-                            "Codex did not return configuration: " + errors.read()
-                        )
+                        self.fail(f"Codex did not return {method}: " + errors.read())
                 self.assertIn("/0.166.0 ", responses[0]["userAgent"])
                 return responses[1]
             finally:
@@ -116,7 +117,7 @@ ignore_default_excludes = false
                             "-c",
                             'sandbox_mode="danger-full-access"',
                         ]
-                    result = self.read_config(root, home, overrides)
+                    result = self.read_app_server(root, home, overrides)
                     for key, value in expected.items():
                         if isinstance(value, dict):
                             for name, setting in value.items():
@@ -142,6 +143,61 @@ ignore_default_excludes = false
                         self.assertEqual(
                             project["config"]["sandbox_mode"], "danger-full-access"
                         )
+
+    # Check native skill discovery and canonical permissions as the actual factory user, offline.
+    def test_factory_skills_are_discoverable_and_read_only(self):
+        bundle = Path("/opt/factory/skills")
+        references = {
+            "implement": (),
+            "code-review": (),
+            "pr": ("CREDITS.md",),
+            "tdd": ("tests.md", "mocking.md"),
+            "codebase-design": ("DEEPENING.md", "DESIGN-IT-TWICE.md"),
+        }
+        expected = set(references)
+        self.assertEqual(os.getuid(), pwd.getpwnam("factory").pw_uid)
+        self.assertTrue(bundle.is_dir(), "Factory skill bundle missing from image")
+        self.assertEqual({path.name for path in bundle.iterdir()}, expected)
+        self.assertEqual(
+            {
+                str(path.relative_to(bundle))
+                for path in bundle.rglob("*")
+                if path.is_file()
+            },
+            {
+                f"{name}/{filename}"
+                for name, files in references.items()
+                for filename in ("SKILL.md", "agents/openai.yaml", *files)
+            },
+        )
+        self.assertEqual((Path.home() / ".agents/skills").resolve(), bundle)
+        for path in (bundle.parent, bundle, *bundle.rglob("*")):
+            with self.subTest(path=path):
+                self.assertEqual(path.stat().st_uid, 0)
+                self.assertFalse(os.access(path, os.W_OK))
+                self.assertTrue(os.access(path, os.R_OK))
+        with tempfile.TemporaryDirectory(dir="/workspace") as directory:
+            root = Path(directory)
+            result = self.read_app_server(
+                root,
+                Path.home(),
+                method="skills/list",
+                params={"cwds": [str(root)], "forceReload": True},
+            )
+            self.assertEqual(len(result["data"]), 1)
+            discovered = result["data"][0]
+            self.assertEqual(discovered["errors"], [])
+            skills = {
+                skill["name"]: skill
+                for skill in discovered["skills"]
+                if skill["name"] in expected
+            }
+            self.assertEqual(set(skills), expected)
+            for name, skill in skills.items():
+                self.assertEqual(
+                    Path(skill["path"]).resolve(), bundle / name / "SKILL.md"
+                )
+                self.assertTrue(skill["enabled"])
 
     # Verify the actual ARM64 image runtime and both invocation names, including
     # script shebangs, before accepting the interpreter selection.

@@ -1,4 +1,4 @@
-# Stage worker sources and define the native image, empty GitHub secret, scoped roles, and retained logs; no AWS lookups.
+# Stage worker/skill sources and define the native image, empty GitHub secret, scoped roles, and retained logs; no AWS lookups.
 import shutil
 from pathlib import Path
 
@@ -20,7 +20,7 @@ from src.infra.workflow import CONNECTOR
 ROOT = Path(__file__).resolve().parents[2]
 
 
-# Rebuild the generated staging directory with only current image/worker sources for the asset ZIP.
+# Rebuild the asset ZIP staging directory from current worker/image sources and the explicit trusted skill bundle.
 def stage_source(outdir):
     source = Path(outdir) / "factory-source"
     if source.exists():
@@ -33,6 +33,18 @@ def stage_source(outdir):
     shutil.copyfile(ROOT / "src/__init__.py", source / "src/__init__.py")
     for name in ("__init__.py", "server.py", "task.py"):
         shutil.copyfile(ROOT / "src/worker" / name, source / "src/worker" / name)
+    skills = {
+        "implement": (),
+        "code-review": (),
+        "pr": ("CREDITS.md",),
+        "tdd": ("tests.md", "mocking.md"),
+        "codebase-design": ("DEEPENING.md", "DESIGN-IT-TWICE.md"),
+    }
+    for name, references in skills.items():
+        relative = Path("image/skills") / name
+        (source / relative / "agents").mkdir(parents=True)
+        for filename in ("SKILL.md", "agents/openai.yaml", *references):
+            shutil.copyfile(ROOT / relative / filename, source / relative / filename)
     return str(source)
 
 

@@ -26,6 +26,15 @@ COPY src/__init__.py /opt/factory/src/__init__.py
 COPY src/worker /opt/factory/src/worker
 # Root-owned managed policy cannot be overwritten by the worker or cloned repository.
 COPY image/managed_config.toml /etc/codex/managed_config.toml
+# Canonical factory skills are immutable to the worker; native discovery points to this bundle.
+COPY image/skills/implement/ /opt/factory/skills/implement/
+COPY image/skills/code-review/ /opt/factory/skills/code-review/
+COPY image/skills/pr/ /opt/factory/skills/pr/
+COPY image/skills/tdd/ /opt/factory/skills/tdd/
+COPY image/skills/codebase-design/ /opt/factory/skills/codebase-design/
+RUN chmod -R a=rX /opt/factory/skills \
+    && mkdir -p /home/factory/.agents \
+    && ln -s /opt/factory/skills /home/factory/.agents/skills
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 WORKSPACE=/workspace AWS_REGION=us-east-1
 USER factory
 EXPOSE 8080

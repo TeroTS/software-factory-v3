@@ -1,0 +1,5 @@
+interface:
+  display_name: "Implement"
+  short_description: "Implement an Agent task or repair review findings"
+policy:
+  allow_implicit_invocation: true
