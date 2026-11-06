@@ -77,6 +77,19 @@ class SandboxTests(unittest.TestCase):
                     process.kill()
                     process.communicate(timeout=5)
 
+    # Confirm the pinned CLI exposes fresh structured-output/result-file options without model inference.
+    def test_fresh_review_cli_capabilities(self):
+        help_text = subprocess.check_output(
+            ["codex", "exec", "--help"], text=True, timeout=15
+        )
+        for option in (
+            "--ephemeral",
+            "--output-schema",
+            "--output-last-message",
+            "--sandbox",
+        ):
+            self.assertIn(option, help_text)
+
     # Managed policy wins over even trusted project/user/session settings on the pinned CLI.
     def test_factory_config_loading_and_override_precedence(self):
         policy = Path("/etc/codex/managed_config.toml")

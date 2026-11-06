@@ -104,6 +104,10 @@ class WorkerFixture(unittest.TestCase):
         }
         self.prs = []
         self.agent_calls = 0
+        self.stages = []
+        self.events = []
+        self.reviewed_files = []
+        self.reviewed_head = None
         self.clone_url = "https://github.com/example/authorized-project.git"
         environment_patch = patch.dict(os.environ, self.env)
         environment_patch.start()
@@ -188,6 +192,8 @@ class WorkerFixture(unittest.TestCase):
         )
 
     def external(self, args, cwd, env, secrets=None):
+        if args[0].startswith("./scripts/"):
+            self.events.append(args[0])
         if args[:3] == ["aws", "configure", "export-credentials"]:
             return json.dumps(
                 {
@@ -219,35 +225,56 @@ class WorkerFixture(unittest.TestCase):
 
     def agent(self, args, prompt, cwd, env, secrets):
         self.agent_calls += 1
-        self.assertEqual(
-            args,
-            [
-                "codex",
-                "exec",
-                "--ephemeral",
-                "-C",
-                str(cwd),
-                "--add-dir",
-                str(cwd / ".git"),
-                "-",
-            ],
-        )
-        self.assertIn("gh pr create", prompt)
+        self.assertEqual(args[:5], ["codex", "exec", "--ephemeral", "-C", str(cwd)])
+        self.assertEqual(args[-1], "-")
+        for forbidden in ("resume", "fork", "--full-auto"):
+            self.assertNotIn(forbidden, args)
         self.assertNotIn(env["GH_TOKEN"], prompt)
-        self.assertIn("same invocation", prompt)
-        self.assertIn("./scripts/verify", prompt)
-        self.assertIn("targeting release", prompt)
+        self.assertIn(self.job["task"], prompt)
+        self.assertIn(self.sha, prompt)
         self.assertNotIn("calculator", prompt)
-        self.assertNotIn("multiply", prompt)
-        (cwd / "greeting.txt").write_text("hello world\n")
-        self.external(["./scripts/verify"], cwd, env)
-        for cmd in (
-            ["git", "add", "."],
-            ["git", "commit", "-m", "task"],
-            ["git", "push", "origin", "HEAD"],
-        ):
-            self.external(cmd, cwd, env)
+        if "/opt/factory/skills/implement/SKILL.md" in prompt:
+            self.stages.append("implement")
+            self.events.append("implement")
+            self.assertIn("without commit", prompt)
+            (cwd / "greeting.txt").write_text("hello staged\n")
+            (cwd / "staged.txt").write_text("staged-only change\n")
+            self.external(["git", "add", "greeting.txt", "staged.txt"], cwd, env)
+            (cwd / "greeting.txt").write_text("hello world\n")
+            (cwd / "untracked.txt").write_text("untracked change\n")
+            return
         head = self.external(["git", "rev-parse", "HEAD"], cwd, env).strip()
+        if "/opt/factory/skills/code-review/SKILL.md" in prompt:
+            self.stages.append("review")
+            self.events.append("review")
+            self.reviewed_head = head
+            self.reviewed_files = self.external(
+                ["git", "diff", "--name-only", self.sha, head], cwd, env
+            ).splitlines()
+            self.assertEqual(
+                self.external(["git", "show", "HEAD:greeting.txt"], cwd, env),
+                "hello world\n",
+            )
+            self.assertIn("staged.txt", self.reviewed_files)
+            self.assertIn("untracked.txt", self.reviewed_files)
+            self.assertIn(head, prompt)
+            self.assertFalse(self.external(["git", "status", "--porcelain"], cwd, env))
+            schema = Path(args[args.index("--output-schema") + 1])
+            self.assertEqual(
+                json.loads(schema.read_text())["required"], ["verdict", "findings"]
+            )
+            result = Path(args[args.index("--output-last-message") + 1])
+            self.assertFalse(result.is_relative_to(cwd))
+            self.assertFalse(result.exists())
+            result.write_text(json.dumps({"verdict": "PASS", "findings": []}))
+            return
+        self.stages.append("publish")
+        self.events.append("publish")
+        self.assertIn("/opt/factory/skills/pr/SKILL.md", prompt)
+        self.assertIn("gh pr create", prompt)
+        self.assertIn("targeting release", prompt)
+        self.assertEqual(head, self.reviewed_head)
+        self.external(["git", "push", "origin", "HEAD"], cwd, env)
         branch = self.external(["git", "branch", "--show-current"], cwd, env).strip()
         self.prs = [
             {
@@ -273,8 +300,7 @@ class WorkerTests(WorkerFixture):
             self.task.invoke_agent(self.job, self.origin, "branch", self.env, [])
         agent.assert_not_called()
 
-    # Exercises real local checkout, tests, and Git with simulated external services,
-    # checking one agent invocation, one PR, and secret-free passing-test logs.
+    # Real Git/scripts prove verification precedes local commit/review/publication without re-verifying.
     def test_real_checkout_tests_git_and_simulated_agent_publication(self):
         calls = []
 
@@ -298,9 +324,17 @@ class WorkerTests(WorkerFixture):
                 for call in calls
                 if call in ("./scripts/setup", "./scripts/verify", "agent")
             ],
-            ["./scripts/setup", "./scripts/verify", "agent", "./scripts/verify"],
+            [
+                "./scripts/setup",
+                "./scripts/verify",
+                "agent",
+                "./scripts/verify",
+                "agent",
+                "agent",
+            ],
         )
-        self.assertEqual(self.agent_calls, 1)
+        self.assertEqual(self.stages, ["implement", "review", "publish"])
+        self.assertEqual(self.agent_calls, 3)
         self.assertEqual(len(self.prs), 1)
         for stubber in self.stubbers.values():
             stubber.assert_no_pending_responses()
@@ -314,7 +348,10 @@ class WorkerTests(WorkerFixture):
             "prepare_environment",
             "prepare_repository",
             "invoke_agent",
-            "verify_completion",
+            "verify_candidate",
+            "commit_candidate",
+            "review_candidate",
+            "publish_candidate",
             "credentials",
         )
         for failed in stages:
@@ -478,7 +515,7 @@ class WorkerTests(WorkerFixture):
             def contradict(
                 args, cwd, env, secrets=None, index=index, prefix=prefix, reply=reply
             ):
-                if self.agent_calls > index and args[:2] == prefix:
+                if self.stages and self.stages[-1] == "publish" and args[:2] == prefix:
                     return reply
                 return self.external(args, cwd, env)
 
@@ -497,6 +534,8 @@ class WorkerTests(WorkerFixture):
     def test_target_branch_can_advance_during_agent_work(self):
         def agent(*args):
             self.agent(*args)
+            if self.stages[-1] != "publish":
+                return
             (self.origin / "target-only.txt").write_text("another change\n")
             self.git("add", ".")
             self.git("commit", "-m", "advance target")
@@ -510,13 +549,15 @@ class WorkerTests(WorkerFixture):
             contextlib.redirect_stdout(io.StringIO()) as logs,
         ):
             self.task.execute(self.job)
-        self.assertEqual(self.agent_calls, 1)
+        self.assertEqual(self.agent_calls, 3)
         self.assertIn("Verified repository script", logs.getvalue())
 
     # Reject a task whose final commit does not descend from the pinned baseline.
     def test_completion_requires_pinned_baseline_ancestry(self):
         def agent(*args):
             self.agent(*args)
+            if self.stages[-1] != "implement":
+                return
             repository, env = args[2:4]
             tree = self.external(
                 ["git", "rev-parse", "HEAD^{tree}"], repository, env
@@ -659,7 +700,7 @@ class WorkerTests(WorkerFixture):
             path.write_text(original)
             path.chmod(0o755)
 
-    def test_final_verification_failure_rejects_published_work(self):
+    def test_independent_verification_failure_prevents_review_and_publication(self):
         for index, failure in enumerate(("missing", "nonexecutable", "nonzero")):
             self.sdk()
 
@@ -698,7 +739,7 @@ class WorkerTests(WorkerFixture):
                     logs.getvalue(),
                 )
             self.assertEqual(self.agent_calls, index + 1)
-            self.assertEqual(len(self.prs), 1)
+            self.assertEqual(len(self.prs), 0)
 
     def test_invalid_target_branch_stops_before_scripts_or_agent(self):
         with (

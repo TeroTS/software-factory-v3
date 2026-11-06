@@ -4,6 +4,8 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
+import tomllib
 import uuid
 from contextlib import closing
 from datetime import UTC, datetime
@@ -12,6 +14,13 @@ from pathlib import Path
 import boto3
 from botocore.config import Config
 
+from src.worker.prompts import implementation_prompt, publication_prompt, review_prompt
+from src.worker.review import (
+    REVIEW_SCHEMA,
+    ReviewError,
+    ReviewRejected,
+    read_review_result,
+)
 from src.worker.server import parse_job
 
 CODEX_CONFIG = Path("/etc/codex/managed_config.toml")
@@ -124,26 +133,6 @@ def run_agent(args, prompt, cwd, env, secrets):
     result.check_returncode()
 
 
-# Give one agent the approved task, script contract, sandbox probe, and configured publication target.
-def prompt_for(job, branch, target):
-    return f"""Work only in {job["repository"]} at pinned baseline {job["baseSha"]} on branch {branch}.
-Task: {job["task"]}
-Your FIRST shell command must be exactly: printf factory-shell-ok
-Stop on failure of this initial sandbox check, sandbox enforcement, model authentication or inference.
-After the check, recover ordinary command failures with installed equivalents within this same invocation.
-Diagnose/fix/rerun failing tests in this same invocation; no agent restart, whole-task rerun, provider/model change or sandbox removal.
-Implement the requested task and appropriate tests; do not weaken tests or modify deployment configuration.
-Inspect the nonempty diff for correctness and test adequacy. Run final verification from the repository root:
-./scripts/verify
-Only after it exits 0, commit, push, and run gh pr create in this same invocation.
-Commit on {branch}; push only that branch to origin and create one PR targeting {target}, left unmerged.
-On publication timeout, inspect the existing remote branch/PR before retrying in this same invocation to avoid duplicates.
-Use a standalone git ls-remote to confirm a timed-out push, or gh pr view/list to confirm a timed-out PR creation.
-Never push directly to {target}, merge a PR, display credentials, change AWS configuration, or include secret values in output.
-Stop on unrecoverable failure. Your prose final response or successful process exit is not completion evidence.
-"""
-
-
 # Prepare the subprocess environment and Git auth; register secrets and reject unscoped credentials.
 def prepare_environment(secrets):
     env = {
@@ -215,7 +204,7 @@ def prepare_repository(job, env, secrets):
 
 
 # Enforce the pinned Codex invocation for this Job/branch; propagate process failure.
-def invoke_agent(job, repository, branch, env, secrets):
+def invoke_agent(job, repository, branch, env, secrets, *, prompt=None, options=()):
     version = capture(["codex", "--version"], repository, env).strip()
     if version != "codex-cli 0.166.0":
         raise ValueError("Unexpected pinned Codex version")
@@ -229,10 +218,17 @@ def invoke_agent(job, repository, branch, env, secrets):
         str(repository),
         "--add-dir",
         str(repository / ".git"),
+        *options,
         "-",
     ]
     run_agent(
-        args, prompt_for(job, branch, env["PR_TARGET_BRANCH"]), repository, env, secrets
+        args,
+        prompt
+        if prompt is not None
+        else implementation_prompt(job, branch, env["PR_TARGET_BRANCH"]),
+        repository,
+        env,
+        secrets,
     )
 
 
@@ -256,9 +252,9 @@ def verify_pr(prs, branch, head, target):
         raise ValueError("PR does not match verified unmerged task publication")
 
 
-# Independently verify scripts and Git/PR consistency; human review judges correctness, not publication chronology.
-def verify_completion(job, repository, branch, env, secrets):
-    print("Independently verify repository script and publication", flush=True)
+# Independently verify implementation before any review or publication; propagate script failures.
+def verify_candidate(repository, env, secrets):
+    print("Independently verify repository candidate", flush=True)
     path = repository / "scripts/verify"
     if not path.is_file() or not os.access(path, os.X_OK):
         print(
@@ -268,9 +264,99 @@ def verify_completion(job, repository, branch, env, secrets):
             "Missing or non-executable repository script: ./scripts/verify"
         )
     logged(["./scripts/verify"], repository, env, secrets)
+
+
+# Stage every tracked/untracked candidate change and create the ordinary commit that review will identify.
+def commit_candidate(repository, branch, env, secrets):
+    if capture(["git", "branch", "--show-current"], repository, env).strip() != branch:
+        raise ValueError("Candidate left assigned task branch")
+    logged(["git", "add", "--all"], repository, env, secrets)
+    logged(["git", "commit", "-m", "Implement Agent task"], repository, env, secrets)
+    return capture(["git", "rev-parse", "HEAD"], repository, env).strip()
+
+
+# Run fresh read-only review using a new external result file; reject unreliable evidence or required corrections.
+def review_candidate(job, repository, branch, head, env, secrets):
+    print("Fresh review of commit " + head, flush=True)
+    with tempfile.TemporaryDirectory(
+        prefix="factory-review-", dir=repository.parent
+    ) as directory:
+        schema = Path(directory) / "schema.json"
+        result = Path(directory) / "last-message.json"
+        schema.write_text(json.dumps(REVIEW_SCHEMA))
+        policy = tomllib.loads(CODEX_CONFIG.read_text())
+        # Managed workspace-write overrides CLI sandbox selection; Git checks still enforce read-only review.
+        options = (
+            []
+            if policy.get("sandbox_mode") == "workspace-write"
+            else ["--sandbox", "read-only"]
+        )
+        prompt = review_prompt(job, branch, env["PR_TARGET_BRANCH"], head)
+        try:
+            invoke_agent(
+                job,
+                repository,
+                branch,
+                env,
+                secrets,
+                prompt=prompt,
+                options=[
+                    *options,
+                    "--output-schema",
+                    str(schema),
+                    "--output-last-message",
+                    str(result),
+                ],
+            )
+        except (subprocess.CalledProcessError, OSError) as error:
+            raise ReviewError("Reviewer process failed") from error
+        verify_review_unchanged(repository, branch, head, env)
+        verdict, findings = read_review_result(result)
+    print("Review verdict " + verdict + " for commit " + head, flush=True)
+    if verdict == "FAIL":
+        print(redact(json.dumps(findings), secrets), flush=True)
+        raise ReviewRejected("Review requires corrections")
+
+
+# Reject review-time changes to the commit, task branch, index, tracked files, or untracked files.
+def verify_review_unchanged(repository, branch, head, env):
+    if (
+        capture(["git", "rev-parse", "HEAD"], repository, env).strip() != head
+        or capture(["git", "branch", "--show-current"], repository, env).strip()
+        != branch
+        or capture(
+            ["git", "status", "--porcelain", "--untracked-files=all"], repository, env
+        ).strip()
+    ):
+        raise ReviewError("Reviewer changed candidate")
+
+
+# Publish the existing reviewed commit once; after ambiguous process exit inspect state instead of retrying.
+def publish_candidate(job, repository, branch, head, env, secrets):
+    prompt = publication_prompt(job, branch, env["PR_TARGET_BRANCH"], head)
+    try:
+        invoke_agent(job, repository, branch, env, secrets, prompt=prompt)
+    except (subprocess.CalledProcessError, OSError):
+        print(
+            "Publication process failed; inspect existing Git/PR state without retry",
+            flush=True,
+        )
+    verify_completion(job, repository, branch, head, env)
+
+
+# Independently confirm publication of exactly the reviewed commit; no verification rerun after read-only review.
+def verify_completion(job, repository, branch, reviewed_head, env):
+    print("Independently confirm reviewed publication", flush=True)
+    verify_local_candidate(job, repository, branch, reviewed_head, env)
+    verify_remote_publication(job, repository, branch, reviewed_head, env)
+
+
+# Confirm a clean task branch at the reviewed SHA with a nonempty change descended from the pinned baseline.
+def verify_local_candidate(job, repository, branch, reviewed_head, env):
     head = capture(["git", "rev-parse", "HEAD"], repository, env).strip()
     if (
-        head == job["baseSha"]
+        head != reviewed_head
+        or head == job["baseSha"]
         or capture(["git", "branch", "--show-current"], repository, env).strip()
         != branch
     ):
@@ -285,6 +371,10 @@ def verify_completion(job, repository, branch, env, secrets):
     ).splitlines()
     if not changes:
         raise ValueError("Missing nonempty committed change")
+
+
+# Confirm the remote branch and exactly one open PR have the reviewed head and configured target.
+def verify_remote_publication(job, repository, branch, head, env):
     remote = capture(
         ["git", "ls-remote", "--heads", "origin", branch], repository, env
     ).split()
@@ -319,7 +409,10 @@ def execute(job):
     env, initial_access = prepare_environment(secrets)
     repository, branch = prepare_repository(job, env, secrets)
     invoke_agent(job, repository, branch, env, secrets)
-    verify_completion(job, repository, branch, env, secrets)
+    verify_candidate(repository, env, secrets)
+    head = commit_candidate(repository, branch, env, secrets)
+    review_candidate(job, repository, branch, head, env, secrets)
+    publish_candidate(job, repository, branch, head, env, secrets)
     print("Rediscover scoped runtime credentials after completion", flush=True)
     refreshed_access = credentials(env, secrets)
     print(
@@ -328,7 +421,9 @@ def execute(job):
         flush=True,
     )
     print(
-        "Verified repository script, nonempty commit, baseline ancestry and one agent-published unmerged PR; human correctness review required",
+        "Verified repository script, nonempty commit, baseline ancestry and one agent-published unmerged PR; fresh review PASS for commit "
+        + head
+        + "; merge not authorized",
         flush=True,
     )
 

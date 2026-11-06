@@ -127,15 +127,19 @@ def inspect_publication(session, vm_id, version, job, target):
     branches = set(
         re.findall(r"Command completed: git switch -c (\S+); actual exit code 0", logs)
     )
-    final = logs.split("Independently verify repository script and publication")
+    verification = logs.split("Independently verify repository candidate")
+    reviewed = re.findall(r"Review verdict PASS for commit ([0-9a-f]{40})", logs)
     if (
         len(branches) != 1
-        or "Agent process actual exit code 0" not in logs
-        or len(final) != 2
-        or "Command completed: ./scripts/verify; actual exit code 0" not in final[1]
+        or len(verification) != 2
+        or len(reviewed) != 1
+        or logs.count("Agent process actual exit code 0") < 2
+        or "Command completed: ./scripts/verify; actual exit code 0"
+        not in verification[-1].split("Fresh review of commit")[0]
+        or "Independently confirm reviewed publication" not in logs
     ):
         raise live.OperatorError(
-            "Missing agent/independent verification or unique task-branch evidence"
+            "Missing stage verification, passing review, or unique task-branch evidence"
         )
     branch = branches.pop()
     repository = job["repository"]
@@ -157,6 +161,8 @@ def inspect_publication(session, vm_id, version, job, target):
     remote = json.loads(
         live.output("gh", "api", "repos/" + repository + "/git/ref/heads/" + branch)
     )["object"]["sha"]
+    if reviewed != [remote]:
+        raise live.OperatorError("Published head does not match the reviewed commit")
     verify_pr(prs, branch, remote, target)
     comparison = json.loads(
         live.output(
@@ -311,7 +317,7 @@ def execute(session, name, job_file):
         + version
         + "; "
         + str(polls)
-        + " authenticated polls; VM TERMINATED. Human diff/test approval and merge remain separate."
+        + " authenticated polls; fresh review PASS; VM TERMINATED. PR remains unmerged; merge is not authorized by this Job."
     )
 
 

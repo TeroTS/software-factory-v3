@@ -375,6 +375,8 @@ class InfrastructureTests(unittest.TestCase):
                 "src/worker/__init__.py",
                 "src/worker/server.py",
                 "src/worker/task.py",
+                "src/worker/prompts.py",
+                "src/worker/review.py",
                 "image/skills/implement/SKILL.md",
                 "image/skills/implement/agents/openai.yaml",
                 "image/skills/code-review/SKILL.md",

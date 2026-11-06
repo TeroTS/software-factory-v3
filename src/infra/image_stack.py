@@ -31,7 +31,7 @@ def stage_source(outdir):
         shutil.copyfile(ROOT / "image" / name, source / "image" / name)
     shutil.copyfile(ROOT / "image/Dockerfile", source / "Dockerfile")
     shutil.copyfile(ROOT / "src/__init__.py", source / "src/__init__.py")
-    for name in ("__init__.py", "server.py", "task.py"):
+    for name in ("__init__.py", "server.py", "task.py", "prompts.py", "review.py"):
         shutil.copyfile(ROOT / "src/worker" / name, source / "src/worker" / name)
     skills = {
         "implement": (),
