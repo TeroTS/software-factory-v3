@@ -165,6 +165,20 @@ def simulate(definition, replies, limit=100, job=None):
     raise AssertionError("Simulation exceeded state budget")
 
 
+def entry_definition(definition):
+    entry = {
+        "StartAt": definition["StartAt"],
+        "States": {
+            name: copy.deepcopy(definition["States"][name])
+            for name in ("CheckSubmission", "Input", "QueuedInput", "InvalidSubmission")
+        },
+    }
+    for name in ("Input", "QueuedInput"):
+        entry["States"][name].pop("Next")
+        entry["States"][name]["End"] = True
+    return entry
+
+
 class WorkflowFixture(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
@@ -174,12 +188,12 @@ class WorkflowFixture(unittest.TestCase):
         artifacts = Artifacts(app, "Artifacts", env=env)
         image = Image(app, "Image", artifact_bucket=artifacts.bucket_name, env=env)
         workflow = Workflow(app, "Workflow", image=image, env=env)
+        template = Template.from_stack(workflow)
+        self.filters = next(
+            iter(template.find_resources("AWS::Lambda::EventSourceMapping").values())
+        )["Properties"]["FilterCriteria"]
         resource = next(
-            iter(
-                Template.from_stack(workflow)
-                .find_resources("AWS::StepFunctions::StateMachine")
-                .values()
-            )
+            iter(template.find_resources("AWS::StepFunctions::StateMachine").values())
         )
         encoded = resource["Properties"]["DefinitionString"]
         # Substitute only CloudFormation deployment references, never ASL expressions.

@@ -1,19 +1,12 @@
 import io
 import json
 import os
-import tempfile
 import time
 import unittest
 import uuid
 import zipfile
 from pathlib import Path
 
-from aws_cdk import App, Environment
-from aws_cdk.assertions import Template
-
-from src.infra.artifacts_stack import Artifacts
-from src.infra.image_stack import Image
-from src.infra.workflow_stack import Workflow
 from src.tools import live
 
 
@@ -25,46 +18,14 @@ class LiveDispatchTests(unittest.TestCase):
     def setUp(self):
         self.session = live.operator("AWSAdministratorAccess-172318459814")
         self.name = "factory-dispatch-check-" + uuid.uuid4().hex
-        with tempfile.TemporaryDirectory() as directory:
-            app = App(outdir=directory)
-            env = Environment(account=live.ACCOUNT, region=live.REGION)
-            artifacts = Artifacts(app, "FactoryArtifacts", env=env)
-            image = Image(
-                app, "FactoryImage", artifact_bucket=artifacts.bucket_name, env=env
-            )
-            workflow = Workflow(app, "FactoryWorkflow", image=image, env=env)
-            template = Template.from_stack(workflow)
-            mapping = next(
-                iter(
-                    template.find_resources("AWS::Lambda::EventSourceMapping").values()
-                )
-            )["Properties"]
-            self.filters = mapping["FilterCriteria"]
-            encoded = template.find_resources("AWS::StepFunctions::StateMachine")[
-                "Workflow"
-            ]["Properties"]["DefinitionString"]
-            definition = json.loads(
-                "".join(
-                    part if isinstance(part, str) else "symbolic-value"
-                    for part in encoded["Fn::Join"][1]
-                )
-            )
-            # Run the actual entry states only: no model, GitHub, or MicroVM effects.
-            self.entry = {
-                "StartAt": definition["StartAt"],
-                "States": {
-                    name: definition["States"][name]
-                    for name in (
-                        "CheckSubmission",
-                        "Input",
-                        "QueuedInput",
-                        "InvalidSubmission",
-                    )
-                },
-            }
-            for name in ("Input", "QueuedInput"):
-                self.entry["States"][name].pop("Next")
-                self.entry["States"][name]["End"] = True
+        from src.tests.test_workflow import WorkflowFixture, entry_definition
+
+        fixture = WorkflowFixture()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        self.filters = fixture.filters
+        # Run the actual entry states only: no model, GitHub, or MicroVM effects.
+        self.entry = entry_definition(fixture.definition)
         role = self.aws(
             "iam",
             "create_role",
@@ -189,6 +150,9 @@ class LiveDispatchTests(unittest.TestCase):
                     "*.py"
                 ):
                     archive.write(path, path.name)
+                archive.write(
+                    Path(__file__).with_name("dispatch_observer.py"), "observer.py"
+                )
             code = data.getvalue()
         self.aws(
             "lambda",
@@ -196,7 +160,7 @@ class LiveDispatchTests(unittest.TestCase):
             FunctionName=self.name,
             Runtime="python3.13",
             Role=role,
-            Handler="handler.handle",
+            Handler="observer.handle",
             Code={"ZipFile": code},
             Timeout=30,
             Environment={
@@ -306,8 +270,9 @@ class LiveDispatchTests(unittest.TestCase):
             "lambda", "list_event_source_mappings", FunctionName=self.name
         )["EventSourceMappings"][0]
         self.assertEqual(mapping["FilterCriteria"], self.filters)
-        # These isolated entry tests have no VM; terminal writes explicitly simulate their release.
-        # Drain the INSERT notification before terminal release, avoiding deliberately concurrent dispatch.
+        self.wait_for(lambda: len(self.notifications()) == 1)
+        # No VM runs here. COMPLETED/FAILED below are operator-injected filter probes,
+        # not evidence that a failed workflow releases the queue (it must remain IN_PROGRESS).
         for index, status in enumerate(("COMPLETED", "FAILED"), start=1):
             pending_key = {
                 "PK": {"S": "JOBS"},
@@ -323,7 +288,7 @@ class LiveDispatchTests(unittest.TestCase):
                     "job": {"M": {name: {"S": value} for name, value in job.items()}},
                 },
             )
-            time.sleep(10)
+            self.wait_for(lambda index=index: len(self.notifications()) == 2 * index)
             self.assertEqual(
                 len(
                     self.aws(
@@ -355,6 +320,9 @@ class LiveDispatchTests(unittest.TestCase):
             )
             key = pending_key
             self.wait_for(
+                lambda index=index: len(self.notifications()) == 2 * index + 1
+            )
+            self.wait_for(
                 lambda key=key: (
                     self.aws(
                         "dynamodb",
@@ -375,6 +343,7 @@ class LiveDispatchTests(unittest.TestCase):
             ExpressionAttributeNames={"#s": "status"},
             ExpressionAttributeValues={":s": {"S": "COMPLETED"}},
         )
+        self.wait_for(lambda: len(self.notifications()) == 6)
         # No active or pending queued Jobs remain; direct entry starts carry no queue reference.
         manual = self.aws(
             "stepfunctions",
@@ -385,6 +354,78 @@ class LiveDispatchTests(unittest.TestCase):
         execution = self.wait_for(lambda: self.finished(manual))
         self.assertEqual(execution["status"], "SUCCEEDED")
         self.assertEqual(json.loads(execution["output"]), {"job": job})
+        self.assertEqual(
+            [
+                (record["eventName"], record["status"])
+                for record in self.notifications()
+            ],
+            [
+                ("INSERT", "PENDING"),
+                ("INSERT", "PENDING"),
+                ("MODIFY", "COMPLETED"),
+                ("INSERT", "PENDING"),
+                ("MODIFY", "FAILED"),
+                ("MODIFY", "COMPLETED"),
+            ],
+        )
+        self.assert_excluded_stream_events()
+
+    def notifications(self):
+        events = self.aws("logs", "filter_log_events", logGroupName=self.log_group)[
+            "events"
+        ]
+        return [
+            json.loads(event["message"].split("HANDOFF_RECORD ", 1)[1])
+            for event in events
+            if "HANDOFF_RECORD " in event["message"]
+        ]
+
+    def assert_excluded_stream_events(self):
+        # Outside the JOBS partition, these probes cannot accidentally dispatch work.
+        before = self.notifications()
+        for index, status in enumerate(("IN_PROGRESS", "COMPLETED", "FAILED", "OTHER")):
+            key = {"PK": {"S": "FILTER_PROBE"}, "SK": {"S": str(index)}}
+            self.aws(
+                "dynamodb",
+                "put_item",
+                TableName=self.name,
+                Item={**key, "status": {"S": status}},
+            )
+            for modified in ("PENDING", "IN_PROGRESS", "OTHER"):
+                self.aws(
+                    "dynamodb",
+                    "update_item",
+                    TableName=self.name,
+                    Key=key,
+                    UpdateExpression="SET #s = :s",
+                    ExpressionAttributeNames={"#s": "status"},
+                    ExpressionAttributeValues={":s": {"S": modified}},
+                )
+            self.aws("dynamodb", "delete_item", TableName=self.name, Key=key)
+        control = {
+            "eventName": "INSERT",
+            "PK": "FILTER_PROBE",
+            "SK": "control",
+            "status": "PENDING",
+        }
+        self.aws(
+            "dynamodb",
+            "put_item",
+            TableName=self.name,
+            Item={name: {"S": control[name]} for name in ("PK", "SK", "status")},
+        )
+        # A selected control proves polling is still working; negatives have a bounded observation window.
+        self.wait_for(lambda: control in self.notifications())
+        time.sleep(10)
+        self.assertEqual(self.notifications(), before + [control])
+        self.assertEqual(
+            len(
+                self.aws(
+                    "stepfunctions", "list_executions", stateMachineArn=self.machine
+                )["executions"]
+            ),
+            4,
+        )
 
     def finished(self, arn):
         execution = self.aws("stepfunctions", "describe_execution", executionArn=arn)
