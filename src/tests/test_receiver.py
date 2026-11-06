@@ -174,6 +174,91 @@ class ReceiverTests(unittest.TestCase):
                     {"S": "Title"},
                 )
 
+    def test_method_and_configuration_failures_precede_authentication(self):
+        event = self.event()
+        event["headers"]["X-Hub-Signature-256"] = "bad"
+        event["requestContext"]["http"]["method"] = "GET"
+        result = handle(event, None)
+        self.assertEqual(result["statusCode"], 405)
+        self.assertEqual(json.loads(result["body"])["message"], "POST required")
+        event["requestContext"]["http"]["method"] = "POST"
+        for name, value in (
+            ("WEBHOOK_SECRET", ""),
+            ("AUTHORIZED_REPOSITORY", "example/.."),
+            ("PR_TARGET_BRANCH", " "),
+            ("JOB_TABLE_NAME", ""),
+            ("GITHUB_SECRET_ARN", ""),
+            ("LOCAL_AWS_ENDPOINT", "http://unexpected"),
+            ("LOCAL_GITHUB_ENDPOINT", "http://unexpected"),
+        ):
+            with self.subTest(name=name), patch.dict(os.environ, {name: value}):
+                result = handle(event, None)
+                self.assertEqual(result["statusCode"], 500)
+                self.assertEqual(
+                    json.loads(result["body"])["message"],
+                    "Receiver configuration unavailable",
+                )
+        self.session.client.assert_not_called()
+
+    def test_malformed_bodies_and_signatures_do_not_access_aws(self):
+        cases = []
+        for body, binary in ((None, False), ("!", True), ("\ud800", False)):
+            event = self.event()
+            event.update(body=body, isBase64Encoded=binary)
+            cases.append((event, 400, "Invalid request body"))
+        for signature in (None, "sha256=é"):
+            event = self.event()
+            event["headers"]["X-Hub-Signature-256"] = signature
+            cases.append((event, 403, "Invalid signature"))
+        event = self.event()
+        event["body"] = "{"
+        event["headers"]["X-Hub-Signature-256"] = (
+            "sha256=" + hmac.new(b"signing-secret", b"{", hashlib.sha256).hexdigest()
+        )
+        cases.append((event, 400, "Invalid issue payload"))
+        for event, status, message in cases:
+            with self.subTest(status=status, message=message):
+                result = handle(event, None)
+                self.assertEqual(result["statusCode"], status)
+                self.assertEqual(json.loads(result["body"])["message"], message)
+        self.session.client.assert_not_called()
+
+    def test_invalid_baseline_does_not_enqueue(self):
+        for token in (None, " "):
+            with self.subTest(token=token):
+                self.secrets.get_secret_value.return_value = {"SecretString": token}
+                result = handle(self.event(), None)
+                self.assertEqual(result["statusCode"], 502)
+                self.assertEqual(
+                    json.loads(result["body"])["message"], "Baseline resolution failed"
+                )
+        self.connection.request.assert_not_called()
+        self.secrets.get_secret_value.return_value = {"SecretString": "private-token"}
+        for sha in (None, "not-a-sha", "b" * 39):
+            with self.subTest(sha=sha):
+                self.connection.getresponse.return_value.read.return_value = json.dumps(
+                    {"sha": sha}
+                ).encode()
+                result = handle(self.event(), None)
+                self.assertEqual(result["statusCode"], 502)
+                self.assertEqual(
+                    json.loads(result["body"])["message"], "Baseline resolution failed"
+                )
+        self.table.put_item.assert_not_called()
+
+    def test_baseline_exceptions_preserve_safe_preparation_error(self):
+        self.connection.request.side_effect = OSError("private-token")
+        result = handle(self.event(), None)
+        self.assertEqual(result["statusCode"], 502)
+        self.assertEqual(
+            json.loads(result["body"])["message"],
+            "Job preparation or enqueue failed",
+        )
+        self.assertNotIn("private-token", result["body"])
+        self.table.put_item.assert_not_called()
+        self.secrets.close.assert_called_once()
+        self.connection.close.assert_called_once()
+
     def test_baseline_and_storage_failures_are_safe(self):
         self.connection.getresponse.return_value.status = 404
         self.assertEqual(handle(self.event(), None)["statusCode"], 502)

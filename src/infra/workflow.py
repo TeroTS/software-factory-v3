@@ -1,4 +1,4 @@
-# Connect one Standard Job lifecycle using deployment pins; terminal results exclude tokens.
+# Run one job on a VM using the configured image version; keep tokens out of the final result.
 from aws_cdk import Duration
 from aws_cdk import aws_stepfunctions as sfn
 from aws_cdk import aws_stepfunctions_tasks as tasks
@@ -6,7 +6,7 @@ from aws_cdk import aws_stepfunctions_tasks as tasks
 CONNECTOR = "arn:aws:lambda:us-east-1:aws:network-connector:aws-network-connector:"
 
 
-# Build a supported SDK task, preserving prior state and granting only the pinned image scope.
+# Create an AWS call that saves its reply at result and can access only image_arn.
 def task(scope, name, operation, parameters, result, image_arn):
     return tasks.CallAwsService(
         scope,
@@ -20,8 +20,8 @@ def task(scope, name, operation, parameters, result, image_arn):
     )
 
 
-# Guard absent/nonstring values before string comparisons in lifecycle/status decisions.
-def string(path, value=None):
+# Check that a field is a string and matches value, or is nonempty if no value is given.
+def string_matches(path, value=None):
     return sfn.Condition.and_(
         sfn.Condition.is_present(path),
         sfn.Condition.is_string(path),
@@ -31,7 +31,8 @@ def string(path, value=None):
     )
 
 
-# Use deployment pins to validate/launch/poll/terminate one Job; queued success persists to the supplied table after cleanup.
+# Build the job's workflow using the supplied image and AWS resources.
+# Stop the VM before marking a queued job complete in the supplied table.
 def definition(
     scope,
     image_arn,
@@ -42,27 +43,32 @@ def definition(
     table_name,
     table_arn,
 ):
-    # Direct tests retain [Job]; the Dispatcher carries queue keys separately from the worker payload.
+    # Check whether the job was submitted directly or came from the queue.
     submission = sfn.Choice(
         scope, "CheckSubmission", query_language=sfn.QueryLanguage.JSONATA
     )
+    # Reject invalid input before starting a VM.
     invalid = sfn.Fail(
         scope,
         "InvalidSubmission",
         error="InvalidSubmission",
         cause="Workflow input must be an array containing exactly one Job object.",
     )
-    start = sfn.Pass(scope, "Input", parameters={"job.$": "$[0]"})
+    # Take the single job from the input list.
+    direct_input = sfn.Pass(scope, "Input", parameters={"job.$": "$[0]"})
+    # Keep the queue keys so we can mark this job complete later.
+    queued_input = sfn.Pass(
+        scope, "QueuedInput", parameters={"job.$": "$.jobs[0]", "queue.$": "$.queue"}
+    )
+    # Direct input must be a list containing one job object.
     submission.when(
         sfn.Condition.jsonata(
             "{% $type($states.input) = 'array' and $count($states.input) = 1 "
             "and $type($states.input[0]) = 'object' %}"
         ),
-        start,
+        direct_input,
     )
-    queued_start = sfn.Pass(
-        scope, "QueuedInput", parameters={"job.$": "$.jobs[0]", "queue.$": "$.queue"}
-    )
+    # Queued input must contain one job and valid queue keys.
     submission.when(
         sfn.Condition.jsonata(
             "{% $type($states.input) = 'object' and $type($states.input.jobs) = 'array' "
@@ -70,11 +76,11 @@ def definition(
             "and $type($states.input.queue) = 'object' and $states.input.queue.PK = 'JOBS' "
             "and $type($states.input.queue.SK) = 'string' and $states.input.queue.SK != '' %}"
         ),
-        queued_start,
+        queued_input,
     ).otherwise(invalid)
-    failed = sfn.Fail(scope, "JobFailed", error_path="$.error", cause_path="$.cause")
-    succeeded = sfn.Succeed(scope, "JobSucceeded")
-    no_vm = sfn.Pass(
+
+    # If we don't know the VM ID, report the launch failure without trying to stop it.
+    launch_failure = sfn.Pass(
         scope,
         "RecordLaunchFailure",
         parameters={
@@ -82,43 +88,9 @@ def definition(
             "error": "JobFailed",
             "cause": "Launch failed without a known VM ID; uncertain launches remain lifespan-bounded. Inspect execution history and recover manually.",
         },
-    ).next(failed)
-    cleanup_failed = sfn.Pass(
-        scope,
-        "RecordCleanupFailure",
-        parameters={
-            "microvmId.$": "$.vm.MicrovmId",
-            "status": "error",
-            "error": "CleanupUnconfirmed",
-            "cause": "Termination is unconfirmed; recover the retained VM ID manually. VM lifespan remains the fallback.",
-        },
-    ).next(failed)
-    job_failed = sfn.Pass(
-        scope,
-        "RecordJobFailure",
-        parameters={
-            "microvmId.$": "$.microvmId",
-            "status.$": "$.status",
-            "termination.$": "$.termination",
-            "error": "JobFailed",
-            "cause": "Task failed; inspect CloudWatch and the retained VM ID.",
-        },
-    ).next(failed)
-    success = sfn.Pass(
-        scope,
-        "RecordSuccess",
-        result=sfn.Result.from_object({"status": "ok"}),
-        result_path="$.outcome",
     )
-    failure = sfn.Pass(
-        scope,
-        "RecordFailure",
-        parameters={
-            "status": "error",
-            "reason": "Worker or post-launch service failure; inspect CloudWatch and execution history.",
-        },
-        result_path="$.outcome",
-    )
+    # Start the chosen image version; limit VM life to 30 minutes.
+    # Use the execution name to prevent duplicate launches for this run.
     launch = task(
         scope,
         "LaunchVM",
@@ -142,11 +114,15 @@ def definition(
         "$.vm",
         image_arn,
     )
+    # Check that AWS returned a VM ID.
     check_launch = sfn.Choice(scope, "CheckLaunch")
+    # Check that AWS returned the VM's address.
     check_endpoint = sfn.Choice(scope, "CheckEndpoint")
+    # Wait five seconds between startup checks.
     startup_wait = sfn.Wait(
         scope, "WaitForVMToStart", time=sfn.WaitTime.duration(Duration.seconds(5))
     )
+    # Ask AWS whether the VM has started; keep the VM ID and address.
     get_vm = task(
         scope,
         "GetVMState",
@@ -155,8 +131,20 @@ def definition(
         "$.lifecycle",
         image_arn,
     )
-    running = sfn.Choice(scope, "IsVMRunning")
-    token = task(
+    # Wait if the VM is still starting; contact the worker once it is running.
+    check_running = sfn.Choice(scope, "IsVMRunning")
+
+    # Without a VM ID, we can't safely request termination.
+    launch.add_catch(launch_failure, result_path="$.failure")
+    launch.next(check_launch)
+    check_launch.when(string_matches("$.vm.MicrovmId"), check_endpoint).otherwise(
+        launch_failure
+    )
+    # Ask AWS again after each wait.
+    startup_wait.next(get_vm).next(check_running)
+
+    # Get one access token for the worker's port; reuse it for all status checks.
+    get_worker_token = task(
         scope,
         "GetWorkerToken",
         "createMicrovmAuthToken",
@@ -168,10 +156,12 @@ def definition(
         "$.auth",
         image_arn,
     )
+    # Check that the access token is present and not empty.
     check_token = sfn.Choice(scope, "CheckWorkerToken")
-    # HttpInvoke grants wildcard state-machine access and couples apiRoot to the URL;
-    # a raw HTTP task preserves the dynamic host and the stack's narrower GET permissions.
-    poll = sfn.CustomState(
+    # Call the worker's /status URL using the access token.
+    # Define this HTTP call directly: CDK's HttpInvoke would broaden permissions
+    # and tie the URL to a fixed address, but each VM has its own address.
+    poll_worker = sfn.CustomState(
         scope,
         "PollWorker",
         state_json={
@@ -190,17 +180,79 @@ def definition(
             "ResultPath": "$.response",
         },
     )
-    response_present = sfn.Choice(scope, "CheckWorkerResponse")
+    # Check that the worker replied with HTTP 200 and a body.
+    check_response = sfn.Choice(scope, "CheckWorkerResponse")
+    # Convert the reply body to a string so we can check its exact contents.
     encode_status = sfn.Pass(
         scope,
         "EncodeStatus",
         parameters={"body.$": "States.JsonToString($.response.ResponseBody)"},
         result_path="$.status",
     )
-    status = sfn.Choice(scope, "CheckWorkerStatus")
+    # Accept only pending or ok; treat any other reply as a failure.
+    check_status = sfn.Choice(scope, "CheckWorkerStatus")
+    # Wait ten seconds before checking the worker again.
     worker_wait = sfn.Wait(
         scope, "WaitForWorker", time=sfn.WaitTime.duration(Duration.seconds(10))
     )
+    # Save success, but keep the VM ID so we can stop it first.
+    record_success = sfn.Pass(
+        scope,
+        "RecordSuccess",
+        result=sfn.Result.from_object({"status": "ok"}),
+        result_path="$.outcome",
+    )
+    # Save a failure message without including AWS errors or access tokens.
+    record_failure = sfn.Pass(
+        scope,
+        "RecordFailure",
+        parameters={
+            "status": "error",
+            "reason": "Worker or post-launch service failure; inspect CloudWatch and execution history.",
+        },
+        result_path="$.outcome",
+    )
+
+    # If getting a token or calling the worker fails, record failure.
+    for api in (get_worker_token, poll_worker):
+        api.add_catch(record_failure, result_path="$.failure")
+    # Check the token before calling the worker, then check its reply.
+    get_worker_token.next(check_token)
+    check_token.when(
+        string_matches("$.auth.AuthToken['X-aws-proxy-auth']"), poll_worker
+    ).otherwise(record_failure)
+    poll_worker.next(check_response)
+    check_response.when(
+        sfn.Condition.and_(
+            sfn.Condition.is_present("$.response.StatusCode"),
+            sfn.Condition.is_numeric("$.response.StatusCode"),
+            sfn.Condition.number_equals("$.response.StatusCode", 200),
+            sfn.Condition.is_present("$.response.ResponseBody"),
+        ),
+        encode_status,
+    ).otherwise(record_failure)
+    # Keep checking while pending; otherwise record success or failure.
+    encode_status.next(check_status)
+    check_status.when(
+        string_matches("$.status.body", '{"status":"pending"}'), worker_wait
+    )
+    check_status.when(
+        string_matches("$.status.body", '{"status":"ok"}'), record_success
+    ).otherwise(record_failure)
+    worker_wait.next(poll_worker)
+
+    # If we can't confirm the VM has stopped, save its ID for manual recovery.
+    cleanup_failure = sfn.Pass(
+        scope,
+        "RecordCleanupFailure",
+        parameters={
+            "microvmId.$": "$.vm.MicrovmId",
+            "status": "error",
+            "error": "CleanupUnconfirmed",
+            "cause": "Termination is unconfirmed; recover the retained VM ID manually. VM lifespan remains the fallback.",
+        },
+    )
+    # Ask AWS to stop the VM; keep the job result and queue keys.
     terminate = task(
         scope,
         "TerminateVM",
@@ -209,9 +261,11 @@ def definition(
         "$.terminationRequest",
         image_arn,
     )
+    # Wait five seconds before checking whether the VM has stopped.
     termination_wait = sfn.Wait(
         scope, "WaitForVMToTerminate", time=sfn.WaitTime.duration(Duration.seconds(5))
     )
+    # Ask AWS whether the VM really stopped; the stop request alone isn't proof.
     get_termination = task(
         scope,
         "GetTerminationState",
@@ -220,18 +274,16 @@ def definition(
         "$.lifecycle",
         image_arn,
     )
-    terminated = sfn.Choice(scope, "IsVMTerminated")
-    result = sfn.Pass(
-        scope,
-        "EndResult",
-        parameters={
-            "microvmId.$": "$.vm.MicrovmId",
-            "status.$": "$.outcome.status",
-            "termination": "TERMINATED",
-        },
-    )
-    outcome = sfn.Choice(scope, "CheckEndResult")
-    complete = tasks.CallAwsService(
+    # Continue when the VM has stopped, or wait if it is still stopping.
+    check_terminated = sfn.Choice(scope, "IsVMTerminated")
+
+    # If either AWS call fails, save the VM ID for manual recovery.
+    for api in (terminate, get_termination):
+        api.add_catch(cleanup_failure, result_path="$.failure")
+    terminate.next(termination_wait).next(get_termination).next(check_terminated)
+
+    # Mark a queued job complete in DynamoDB after it succeeds and its VM stops.
+    complete_queued_job = tasks.CallAwsService(
         scope,
         "CompleteQueuedJob",
         service="dynamodb",
@@ -247,55 +299,77 @@ def definition(
         },
         result_path=sfn.JsonPath.DISCARD,
     )
+    # Skip the queue update for failed jobs or jobs submitted directly.
     check_queue = sfn.Choice(scope, "CheckQueueCompletion")
+    # Return only the VM ID, job status, and proof that the VM stopped.
+    terminal_result = sfn.Pass(
+        scope,
+        "EndResult",
+        parameters={
+            "microvmId.$": "$.vm.MicrovmId",
+            "status.$": "$.outcome.status",
+            "termination": "TERMINATED",
+        },
+    )
+    # Finish the workflow as successful or failed based on the job's result.
+    check_outcome = sfn.Choice(scope, "CheckEndResult")
+    # Add a failure reason; keep the VM ID and confirmation that it stopped.
+    job_failure = sfn.Pass(
+        scope,
+        "RecordJobFailure",
+        parameters={
+            "microvmId.$": "$.microvmId",
+            "status.$": "$.status",
+            "termination.$": "$.termination",
+            "error": "JobFailed",
+            "cause": "Task failed; inspect CloudWatch and the retained VM ID.",
+        },
+    )
+    # End the workflow with the saved error and reason.
+    failed = sfn.Fail(scope, "JobFailed", error_path="$.error", cause_path="$.cause")
+    # Report success only after the VM stops and any queue update succeeds.
+    succeeded = sfn.Succeed(scope, "JobSucceeded")
+
+    # Update the queue before returning the result; if the update fails, fail the workflow.
     check_queue.when(
         sfn.Condition.and_(
-            string("$.outcome.status", "ok"), sfn.Condition.is_present("$.queue")
+            string_matches("$.outcome.status", "ok"),
+            sfn.Condition.is_present("$.queue"),
         ),
-        complete,
-    ).otherwise(result)
-    complete.next(result)
-
-    launch.add_catch(no_vm, result_path="$.failure")
-    for api in (get_vm, token, poll):
-        api.add_catch(failure, result_path="$.failure")
-    for api in (terminate, get_termination):
-        api.add_catch(cleanup_failed, result_path="$.failure")
-
-    queued_start.next(launch)
-    start.next(launch).next(check_launch)
-    check_launch.when(string("$.vm.MicrovmId"), check_endpoint).otherwise(no_vm)
-    check_endpoint.when(string("$.vm.Endpoint"), startup_wait).otherwise(failure)
-    startup_wait.next(get_vm).next(running)
-    running.when(string("$.lifecycle.State", "RUNNING"), token)
-    running.when(string("$.lifecycle.State", "PENDING"), startup_wait).otherwise(
-        failure
+        complete_queued_job,
+    ).otherwise(terminal_result)
+    complete_queued_job.next(terminal_result)
+    terminal_result.next(check_outcome)
+    check_outcome.when(string_matches("$.status", "ok"), succeeded).otherwise(
+        job_failure
     )
-    token.next(check_token)
-    check_token.when(string("$.auth.AuthToken['X-aws-proxy-auth']"), poll).otherwise(
-        failure
+
+    # Start the same VM workflow for direct and queued jobs.
+    direct_input.next(launch)
+    queued_input.next(launch)
+    # No VM ID means we must fail without a stop request.
+    # If we have an ID but no address, record failure and stop the VM.
+    launch_failure.next(failed)
+    check_endpoint.when(string_matches("$.vm.Endpoint"), startup_wait).otherwise(
+        record_failure
     )
-    poll.next(response_present)
-    response_present.when(
-        sfn.Condition.and_(
-            sfn.Condition.is_present("$.response.StatusCode"),
-            sfn.Condition.is_numeric("$.response.StatusCode"),
-            sfn.Condition.number_equals("$.response.StatusCode", 200),
-            sfn.Condition.is_present("$.response.ResponseBody"),
-        ),
-        encode_status,
-    ).otherwise(failure)
-    encode_status.next(status)
-    status.when(string("$.status.body", '{"status":"pending"}'), worker_wait)
-    status.when(string("$.status.body", '{"status":"ok"}'), success).otherwise(failure)
-    worker_wait.next(poll)
-    success.next(terminate)
-    failure.next(terminate)
-    terminate.next(termination_wait).next(get_termination).next(terminated)
-    terminated.when(string("$.lifecycle.State", "TERMINATED"), check_queue)
-    terminated.when(
-        string("$.lifecycle.State", "TERMINATING"), termination_wait
-    ).otherwise(cleanup_failed)
-    result.next(outcome)
-    outcome.when(string("$.status", "ok"), succeeded).otherwise(job_failed)
+    # If startup fails or the VM enters an unexpected state, record failure.
+    get_vm.add_catch(record_failure, result_path="$.failure")
+    check_running.when(string_matches("$.lifecycle.State", "RUNNING"), get_worker_token)
+    check_running.when(
+        string_matches("$.lifecycle.State", "PENDING"), startup_wait
+    ).otherwise(record_failure)
+    # Stop the VM whether the worker succeeded or failed.
+    record_success.next(terminate)
+    record_failure.next(terminate)
+    # Once the VM has stopped, finish the job. Keep waiting if it is stopping.
+    check_terminated.when(
+        string_matches("$.lifecycle.State", "TERMINATED"), check_queue
+    )
+    check_terminated.when(
+        string_matches("$.lifecycle.State", "TERMINATING"), termination_wait
+    ).otherwise(cleanup_failure)
+    # Fail the workflow if the job failed or we couldn't confirm the VM stopped.
+    cleanup_failure.next(failed)
+    job_failure.next(failed)
     return submission

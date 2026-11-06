@@ -11,7 +11,9 @@ from pathlib import Path
 from aws_cdk import App, Environment
 from aws_cdk.assertions import Template
 
-from src.infra.stacks import Artifacts, Image, Workflow
+from src.infra.artifacts_stack import Artifacts
+from src.infra.image_stack import Image
+from src.infra.workflow_stack import Workflow
 from src.tools import live
 
 

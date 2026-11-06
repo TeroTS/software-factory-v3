@@ -1,7 +1,9 @@
 # Synthesize native Gate 2 stacks for the approved account/Region; no AWS mutation here.
 from aws_cdk import App, Environment
 
-from src.infra.stacks import Artifacts, Image, Workflow
+from src.infra.artifacts_stack import Artifacts
+from src.infra.image_stack import Image
+from src.infra.workflow_stack import Workflow
 
 
 # Define deployment order; artifact bucket precedes publishing and workflow needs a verified pin.

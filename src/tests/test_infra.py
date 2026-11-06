@@ -12,7 +12,9 @@ from aws_cdk.assertions import Match, Template
 
 class InfrastructureTests(unittest.TestCase):
     def setUp(self):
-        from src.infra.stacks import Artifacts, Image, Workflow
+        from src.infra.artifacts_stack import Artifacts
+        from src.infra.image_stack import Image
+        from src.infra.workflow_stack import Workflow
 
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
@@ -28,6 +30,52 @@ class InfrastructureTests(unittest.TestCase):
         self.workflow = Workflow(self.app, "FactoryWorkflow", image=self.image, env=env)
         self.image_template = Template.from_stack(self.image)
         self.workflow_template = Template.from_stack(self.workflow)
+
+    def test_image_owns_empty_github_secret_and_outputs_arn(self):
+        self.assertEqual(
+            len(self.image_template.find_resources("AWS::SecretsManager::Secret")), 1
+        )
+        template = self.image_template.to_json()
+        secret = template["Resources"]["GitHubToken"]
+        for property_name in ("Name", "SecretString", "GenerateSecretString"):
+            with self.subTest(property_name=property_name):
+                self.assertNotIn(property_name, secret["Properties"])
+        self.assertEqual(secret["DeletionPolicy"], "Retain")
+        self.assertEqual(secret["UpdateReplacePolicy"], "Retain")
+        self.assertEqual(
+            template["Outputs"]["GitHubSecretArn"]["Value"], {"Ref": "GitHubToken"}
+        )
+        self.workflow_template.resource_count_is("AWS::SecretsManager::Secret", 0)
+        receiver_secret_arn = self.workflow.resolve(self.image.github_secret_arn)
+        self.assertIn("Fn::ImportValue", receiver_secret_arn)
+        self.workflow_template.has_resource_properties(
+            "AWS::Lambda::Function",
+            {"Environment": {"Variables": {"GITHUB_SECRET_ARN": receiver_secret_arn}}},
+        )
+
+    def test_ingress_construct_scopes_and_logical_ids_remain_stable(self):
+        expected = {
+            "JobsTable": "JobsTable1970BC16",
+            "ReceiverLogs": "ReceiverLogsDEB6297F",
+            "ReceiverRole": "ReceiverRoleD4C38D72",
+            "IssueReceiver": "IssueReceiver854600CC",
+            "DispatcherLogs": "DispatcherLogsCDE1995F",
+            "DispatcherRole": "DispatcherRoleBDE14D07",
+            "Dispatcher": "DispatcherD4A12972",
+            "JobNotifications": "JobNotifications",
+        }
+        resources = self.workflow_template.to_json()["Resources"]
+        for name, logical_id in expected.items():
+            with self.subTest(name=name):
+                construct = self.workflow.node.find_child(name)
+                self.assertIs(construct.node.scope, self.workflow)
+                resource = (
+                    construct
+                    if name == "JobNotifications"
+                    else construct.node.default_child
+                )
+                self.assertEqual(self.workflow.get_logical_id(resource), logical_id)
+                self.assertIn(logical_id, resources)
 
     # Confirms the application entry point produces a local assembly, preserving
     # credential-free synthesis for reviewing infrastructure before deployment.
@@ -156,7 +204,9 @@ class InfrastructureTests(unittest.TestCase):
         )
         role_scopes = {
             function["Role"]["Fn::GetAtt"][0]: {
-                "secretsmanager:GetSecretValue": "arn:aws:secretsmanager:us-east-1:172318459814:secret:software-factory-poc/github-token-sXayGQ",
+                "secretsmanager:GetSecretValue": self.workflow.resolve(
+                    self.image.github_secret_arn
+                ),
                 "dynamodb:PutItem": table_arn,
             },
             dispatcher["Role"]["Fn::GetAtt"][0]: {
@@ -251,7 +301,7 @@ class InfrastructureTests(unittest.TestCase):
                     [
                         {
                             "Key": "GITHUB_SECRET_ARN",
-                            "Value": "arn:aws:secretsmanager:us-east-1:172318459814:secret:software-factory-poc/github-token-sXayGQ",
+                            "Value": {"Ref": "GitHubToken"},
                         }
                     ]
                 ),
@@ -306,7 +356,7 @@ class InfrastructureTests(unittest.TestCase):
         )
 
     def test_staged_image_contains_pinned_runtime_dependencies(self):
-        from src.infra.stacks import stage_source
+        from src.infra.image_stack import stage_source
 
         staged = Path(self.directory.name) / "factory-source"
         (staged / "stale.py").write_text("obsolete generated source\n")
@@ -455,8 +505,8 @@ class InfrastructureTests(unittest.TestCase):
         self.assertNotIn("AdministratorAccess", text)
         self.assertNotIn("states:GetExecutionHistory", text)
 
-    # Checks Lambda role trust and bounded secret/model permissions without creating
-    # a replacement secret, protecting scoped runtime access and secret preservation.
+    # Checks Lambda role trust and restricts runtime access to the stack-owned token
+    # and approved model resources; credentials remain outside synthesized templates.
     def test_runtime_trust_and_secret_model_scope(self):
         template = self.image_template.to_json()
         roles = self.image_template.find_resources("AWS::IAM::Role")
@@ -476,12 +526,12 @@ class InfrastructureTests(unittest.TestCase):
         )
         self.assertEqual(
             secret["Resource"],
-            "arn:aws:secretsmanager:us-east-1:172318459814:secret:software-factory-poc/github-token-sXayGQ",
+            {"Ref": "GitHubToken"},
         )
         inference = next(s for s in statements if "bedrock:InvokeModel" in s["Action"])
         self.assertEqual(len(inference["Resource"]), 5)
         self.assertNotIn('"Resource": "*"', json.dumps(statements))
-        self.assertNotIn("AWS::SecretsManager::Secret", json.dumps(template))
+        self.assertNotIn("github-token-sXayGQ", json.dumps(template))
 
 
 if __name__ == "__main__":
