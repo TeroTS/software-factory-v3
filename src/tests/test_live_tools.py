@@ -598,6 +598,37 @@ class LiveToolsTests(unittest.TestCase):
         ):
             live.validate_definition(Mock(), expected)
 
+    def test_dispatch_notifications_read_past_empty_cloudwatch_pages(self):
+        from src.tests.test_live_dispatch import LiveDispatchTests
+
+        case = LiveDispatchTests(
+            "test_real_streams_dispatch_preserves_payload_and_direct_input"
+        )
+        case.session = Mock()
+        case.log_group = "/aws/lambda/isolated-test"
+        record = {
+            "eventName": "INSERT",
+            "PK": "JOBS",
+            "SK": "timestamp",
+            "status": "PENDING",
+        }
+        with patch.object(
+            self.module("live"),
+            "aws",
+            side_effect=[
+                {"events": [], "nextToken": "more"},
+                {
+                    "events": [
+                        {"message": "START RequestId: test"},
+                        {"message": "HANDOFF_RECORD " + json.dumps(record)},
+                    ]
+                },
+            ],
+        ) as aws:
+            self.assertEqual(case.notifications(), [record])
+        self.assertEqual(aws.call_count, 2)
+        self.assertEqual(aws.call_args.kwargs["nextToken"], "more")
+
     def test_sdk_boundary_and_wrong_account_guard_need_no_live_credentials(self):
         import boto3
         from botocore.stub import Stubber

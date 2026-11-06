@@ -371,9 +371,13 @@ class LiveDispatchTests(unittest.TestCase):
         self.assert_excluded_stream_events()
 
     def notifications(self):
-        events = self.aws("logs", "filter_log_events", logGroupName=self.log_group)[
-            "events"
-        ]
+        events = live.collect(
+            self.session,
+            "logs",
+            "filter_log_events",
+            "events",
+            logGroupName=self.log_group,
+        )
         return [
             json.loads(event["message"].split("HANDOFF_RECORD ", 1)[1])
             for event in events
