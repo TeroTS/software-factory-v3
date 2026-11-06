@@ -108,7 +108,7 @@ paths:
     get:
       operationId: getStatus
       summary: Read the current job status
-      description: 'Return pending, ok, or error. ok requires independent repository script verification and matching committed Git/PR publication; it does not prove task correctness, test adequacy, or verification-before-publication.'
+      description: 'Return pending, ok, or error. ok requires independent repository verification before a worker-created local commit, a fresh-context review PASS, and matching reviewed/local/remote/PR heads on one open unmerged PR. Review uses structured evidence and rejects candidate changes; publication uses the existing reviewed commit without re-verification. AI review does not prove correctness or test adequacy, and merging remains unauthorized.'
       security:
         - MicrovmProxyAuth: []
       parameters:

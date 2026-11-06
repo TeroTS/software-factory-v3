@@ -123,7 +123,7 @@ class Workflow(Stack):
             state_machine_type=sfn.StateMachineType.STANDARD,
             role=role,
             timeout=Duration.minutes(28),
-            comment="One VM/Codex invocation; timeout/StopExecution rely on VM lifespan and manual recovery.",
+            comment="One VM coordinates implementation, verification, fresh review and unmerged PR publication; timeout/StopExecution rely on VM lifespan and manual recovery.",
             definition_body=sfn.DefinitionBody.from_chainable(
                 definition(
                     self,

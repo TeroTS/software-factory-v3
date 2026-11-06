@@ -469,7 +469,23 @@ class LiveToolsTests(unittest.TestCase):
         module = self.module("run_happy_path")
         live = module.live
         self.job["baseSha"] = self.job["baseSha"].upper()
-        logs = "Command completed: git switch -c factory/task-abc; actual exit code 0\nAgent process actual exit code 0\nIndependently verify repository script and publication\nCommand completed: ./scripts/verify; actual exit code 0\nVerified repository script, nonempty commit, baseline ancestry and one agent-published unmerged PR; human correctness review required"
+        logs = (
+            "Command completed: git switch -c factory/task-abc; actual exit code 0\n"
+            "Agent process actual exit code 0\nIndependently verify repository candidate\n"
+            "Command completed: ./scripts/verify; actual exit code 0\n"
+            "Fresh review of commit "
+            + "b"
+            * 40
+            + "\nAgent process actual exit code 0\n"
+            "Review verdict PASS for commit "
+            + "b"
+            * 40
+            + "\nAgent process actual exit code 0\n"
+            "Independently confirm reviewed publication\n"
+            "Verified repository script, nonempty commit, baseline ancestry and one agent-published unmerged PR; fresh review PASS for commit "
+            + "b" * 40
+            + "; merge not authorized"
+        )
         pr = {
             "number": 1,
             "state": "OPEN",
@@ -483,11 +499,29 @@ class LiveToolsTests(unittest.TestCase):
             "ahead_by": 1,
             "files": [{"filename": "greeting.py"}],
         }
+        ambiguous_logs = logs.replace(
+            "Agent process actual exit code 0\nIndependently confirm reviewed publication",
+            "Agent process actual exit code 1\nPublication process failed; inspect existing Git/PR state without retry\nIndependently confirm reviewed publication",
+        )
         for base, head, messages in (
             ("a" * 40, "b" * 40, logs),
+            ("a" * 40, "b" * 40, ambiguous_logs),
             ("c" * 40, "b" * 40, logs),
             ("a" * 40, "c" * 40, logs),
             ("a" * 40, "b" * 40, "missing evidence"),
+            (
+                "a" * 40,
+                "b" * 40,
+                logs.replace(
+                    "Review verdict PASS for commit " + "b" * 40,
+                    "Review verdict PASS for commit " + "c" * 40,
+                ),
+            ),
+            (
+                "a" * 40,
+                "b" * 40,
+                logs.replace("Review verdict PASS", "Review verdict FAIL"),
+            ),
         ):
             with self.subTest(base=base, head=head, messages=messages):
                 compare = {**comparison, "merge_base_commit": {"sha": base}}
@@ -505,7 +539,11 @@ class LiveToolsTests(unittest.TestCase):
                     ),
                     contextlib.redirect_stdout(io.StringIO()),
                 ):
-                    if base == "a" * 40 and head == "b" * 40 and messages == logs:
+                    if (
+                        base == "a" * 40
+                        and head == "b" * 40
+                        and messages in (logs, ambiguous_logs)
+                    ):
                         self.assertEqual(
                             module.inspect_publication(
                                 Mock(), "microvm-test", "5.0", self.job, "main"

@@ -7,8 +7,10 @@ discovery; development agents can use their globally installed skills instead.
 Docker and CDK staging package the same explicit bundle. The image installs it
 root-owned under `/opt/factory/skills/`, with factory-user native discovery through
 `/home/factory/.agents/skills/`. Canonical files are readable but not writable by
-`factory`. Discovery is not authorization: worker stages must select canonical
-skill paths and enforce independent verification/publication/merge gates.
+`factory`. Discovery is not authorization: worker stages explicitly select canonical
+skill paths and enforce independent verification and review-before-publication.
+The current slice completes with an open, unmerged PR; repair and automatic merge
+remain unimplemented.
 
 ## Reference inventory
 
@@ -33,7 +35,7 @@ files. Source staging and Docker context allow only the required skill files.
 | File reading/search, shell, Git | Ordinary implementation, review, and repair | Existing image/sandbox checks; no Skill tool required. |
 | Native user-skill discovery | All worker stages | Offline pinned-Codex app-server skills listing as `factory`; checks canonical resolution and non-writability. |
 | Repository setup and verification tools | Implementation/repair and independent worker verification | Supplied by the target repository's executable scripts; bundling skills does not provide a language toolchain. |
-| Structured review output | Fresh review | Worker integration must verify pinned CLI output-schema and provider behavior; offline discovery alone cannot establish this. |
+| Structured review output | Fresh review | Offline preflight checks pinned CLI output-schema/last-message flags. Job lifecycle tests simulate structured results and reject invalid evidence or candidate mutation. Real provider behavior still requires separately authorized inference. |
 | GitHub CLI, repository-scoped token, network | Publication and merge | Existing installed CLI and credential scope; live GitHub checks and merge policy require separately authorized verification. |
 | AWS credential discovery and model access | Agent execution | Existing worker/image configuration; no model/provider change or live inference is implied by packaging. |
 | Parallel fresh-context sub-agents | Optional Design It Twice only | Outside ordinary factory Jobs; verify actual CLI/managed-policy/provider support before activation, or report blocked. |
