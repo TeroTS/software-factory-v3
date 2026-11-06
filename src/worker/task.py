@@ -8,7 +8,6 @@ import tempfile
 import tomllib
 import uuid
 from contextlib import closing
-from datetime import UTC, datetime
 from pathlib import Path
 
 import boto3
@@ -81,40 +80,12 @@ def logged(args, cwd, env, secrets):
     return output
 
 
-# Discover expiring execution-role credentials and identity without publishing secret values.
-def credentials(env, secrets):
-    values = json.loads(
-        capture(
-            ["aws", "configure", "export-credentials", "--format", "process"], None, env
-        )
-    )
-    for key in ("AccessKeyId", "SecretAccessKey", "SessionToken"):
-        if not isinstance(values.get(key), str) or not values[key]:
-            raise ValueError("Missing temporary runtime credentials")
-        secrets.append(values[key])
-    expiry = datetime.fromisoformat(values.get("Expiration", ""))
-    if expiry <= datetime.now(UTC):
-        raise ValueError("Runtime credentials expired")
-    with closing(
-        boto3.client("sts", region_name=env["AWS_REGION"], config=AWS_CONFIG)
-    ) as client:
-        identity = client.get_caller_identity()
-    expected = (
-        "arn:aws:sts::172318459814:assumed-role/" + env["EXPECTED_RUNTIME_ROLE"] + "/"
-    )
-    arn = identity.get("Arn")
-    if (
-        identity.get("Account") != "172318459814"
-        or not isinstance(arn, str)
-        or not arn.startswith(expected)
-    ):
-        raise ValueError("Unexpected execution role; refusing secret/model access")
-    print(
-        "Scoped execution-role credential discovery passed; expires "
-        + expiry.isoformat(),
-        flush=True,
-    )
-    return values["AccessKeyId"]
+# Register SDK-discovered credential values for redaction; AWS SDK/service errors handle credential failures.
+def credentials(session, secrets):
+    values = session.get_credentials()
+    if values is not None:
+        frozen = values.get_frozen_credentials()
+        secrets.extend((frozen.access_key, frozen.secret_key, frozen.token))
 
 
 # Run one Codex process with stdin prompt; log redacted diagnostics after exit and propagate failure.
@@ -133,7 +104,7 @@ def run_agent(args, prompt, cwd, env, secrets):
     result.check_returncode()
 
 
-# Prepare the subprocess environment and Git auth; register secrets and reject unscoped credentials.
+# Prepare the subprocess environment and Git auth; use SDK credentials and register secrets for redaction.
 def prepare_environment(secrets):
     env = {
         **os.environ,
@@ -141,12 +112,10 @@ def prepare_environment(secrets):
         "AWS_DEFAULT_REGION": "us-east-1",
         "PYTHONDONTWRITEBYTECODE": "1",
     }
-    print("Discover scoped runtime credentials", flush=True)
-    initial_access = credentials(env, secrets)
+    session = boto3.Session(region_name=env["AWS_REGION"])
+    credentials(session, secrets)
     print("Retrieve repository-scoped GitHub token", flush=True)
-    with closing(
-        boto3.client("secretsmanager", region_name=env["AWS_REGION"], config=AWS_CONFIG)
-    ) as client:
+    with closing(session.client("secretsmanager", config=AWS_CONFIG)) as client:
         token = client.get_secret_value(SecretId=env["GITHUB_SECRET_ARN"]).get(
             "SecretString"
         )
@@ -157,7 +126,7 @@ def prepare_environment(secrets):
     secrets.append(token)
     env["GH_TOKEN"] = token
     capture(["gh", "auth", "setup-git"], None, env)
-    return env, initial_access
+    return env
 
 
 # Clone the pinned authorized repository; run setup and baseline verification, returning path and task branch.
@@ -402,24 +371,17 @@ def verify_remote_publication(job, repository, branch, head, env):
     verify_pr(prs, branch, head, env["PR_TARGET_BRANCH"])
 
 
-# Validate and coordinate one Job's stages; require final scoped credentials before successful exit.
+# Validate and coordinate one Job's stages; complete only after independent review/publication evidence.
 def execute(job):
     job = parse_job({"microvmId": "runtime", "runHookPayload": json.dumps(job)})
     secrets = []
-    env, initial_access = prepare_environment(secrets)
+    env = prepare_environment(secrets)
     repository, branch = prepare_repository(job, env, secrets)
     invoke_agent(job, repository, branch, env, secrets)
     verify_candidate(repository, env, secrets)
     head = commit_candidate(repository, branch, env, secrets)
     review_candidate(job, repository, branch, head, env, secrets)
     publish_candidate(job, repository, branch, head, env, secrets)
-    print("Rediscover scoped runtime credentials after completion", flush=True)
-    refreshed_access = credentials(env, secrets)
-    print(
-        "Runtime credentials rediscovered; rotated: "
-        + str(initial_access != refreshed_access),
-        flush=True,
-    )
     print(
         "Verified repository script, nonempty commit, baseline ancestry and one agent-published unmerged PR; fresh review PASS for commit "
         + head

@@ -9,6 +9,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 import boto3
+from botocore.credentials import Credentials
+from botocore.exceptions import NoCredentialsError
 from botocore.stub import Stubber
 
 
@@ -83,7 +85,6 @@ class WorkerFixture(unittest.TestCase):
         self.env = {
             **os.environ,
             "WORKSPACE": str(workspace or self.root / "workspace"),
-            "EXPECTED_RUNTIME_ROLE": "software-factory-poc-runtime",
             "GITHUB_SECRET_ARN": "secret-arn",
             "AUTHORIZED_REPOSITORY": "example/authorized-project",
             "PR_TARGET_BRANCH": "release",
@@ -112,70 +113,60 @@ class WorkerFixture(unittest.TestCase):
         environment_patch = patch.dict(os.environ, self.env)
         environment_patch.start()
         self.addCleanup(environment_patch.stop)
+        self.make_sdk_client = boto3.Session().client
         self.sdk()
-        self.client_patch = patch("boto3.client", side_effect=self.sdk_client)
+        self.client_patch = patch("boto3.Session.client", side_effect=self.sdk_client)
         self.client_mock = self.client_patch.start()
         self.addCleanup(self.client_patch.stop)
+        credential_patch = patch(
+            "boto3.Session.get_credentials",
+            return_value=Credentials(
+                "synthetic-access", "secret-access", "session-token"
+            ),
+        )
+        self.sdk_credentials = credential_patch.start()
+        self.addCleanup(credential_patch.stop)
 
-    def sdk(self, identity=None, secret=None, identity_error=None, secret_error=None):
-        self.clients = {}
-        self.stubbers = {}
-        for service in ("sts", "secretsmanager"):
-            client = boto3.Session().client(
-                service,
-                region_name="us-east-1",
-                aws_access_key_id="synthetic-access",
-                aws_secret_access_key="synthetic-secret",
-                aws_session_token="synthetic-session",
+    def sdk(self, secret=None, secret_error=None):
+        client = self.make_sdk_client(
+            "secretsmanager",
+            region_name="us-east-1",
+            aws_access_key_id="synthetic-access",
+            aws_secret_access_key="synthetic-secret",
+            aws_session_token="synthetic-session",
+        )
+        stubber = Stubber(client)
+        if secret_error:
+            stubber.add_client_error(
+                "get_secret_value",
+                service_error_code=secret_error,
+                service_message="github_pat_synthetic_token secret-access session-token",
+                expected_params={"SecretId": "secret-arn"},
             )
-            stubber = Stubber(client)
-            if service == "sts":
-                response = (
-                    identity
-                    if identity is not None
-                    else {
-                        "Account": "172318459814",
-                        "Arn": "arn:aws:sts::172318459814:assumed-role/software-factory-poc-runtime/session",
-                        "UserId": "synthetic-user",
-                    }
-                )
-                for _ in range(2):
-                    if identity_error:
-                        stubber.add_client_error(
-                            "get_caller_identity",
-                            service_message=identity_error,
-                            expected_params={},
-                        )
-                    else:
-                        stubber.add_response("get_caller_identity", response, {})
-            elif secret_error:
-                stubber.add_client_error(
+        else:
+            # Permit a malformed empty service response to exercise our trust boundary.
+            with (
+                patch("botocore.stub.validate_parameters")
+                if secret == {"SecretString": ""}
+                else contextlib.nullcontext()
+            ):
+                stubber.add_response(
                     "get_secret_value",
-                    service_message=secret_error,
-                    expected_params={"SecretId": "secret-arn"},
+                    secret
+                    if secret is not None
+                    else {"SecretString": "github_pat_synthetic_token"},
+                    {"SecretId": "secret-arn"},
                 )
-            else:
-                # Permit a malformed empty service response to exercise our trust boundary.
-                with (
-                    patch("botocore.stub.validate_parameters")
-                    if secret == {"SecretString": ""}
-                    else contextlib.nullcontext()
-                ):
-                    stubber.add_response(
-                        "get_secret_value",
-                        secret
-                        if secret is not None
-                        else {"SecretString": "github_pat_synthetic_token"},
-                        {"SecretId": "secret-arn"},
-                    )
-            stubber.activate()
-            self.addCleanup(stubber.deactivate)
-            self.addCleanup(client.close)
-            self.clients[service] = client
-            self.stubbers[service] = stubber
+        stubber.activate()
+        self.addCleanup(stubber.deactivate)
+        self.addCleanup(client.close)
+        self.clients = {"secretsmanager": client}
+        self.stubbers = {"secretsmanager": stubber}
 
     def sdk_client(self, service, **kwargs):
-        self.assertEqual(kwargs["region_name"], "us-east-1")
+        self.assertEqual(
+            service, "secretsmanager", "Worker must not probe STS identity"
+        )
         config = kwargs["config"]
         self.assertEqual(config.connect_timeout, 5)
         self.assertEqual(config.read_timeout, 10)
@@ -194,16 +185,7 @@ class WorkerFixture(unittest.TestCase):
     def external(self, args, cwd, env, secrets=None):
         if args[0].startswith("./scripts/"):
             self.events.append(args[0])
-        if args[:3] == ["aws", "configure", "export-credentials"]:
-            return json.dumps(
-                {
-                    "AccessKeyId": "ASIA" + "X" * 16,
-                    "SecretAccessKey": "secret-access",
-                    "SessionToken": "session-token",
-                    "Expiration": "2099-01-01T00:00:00Z",
-                }
-            )
-        self.assertNotEqual(args[0], "aws", "Only credential export may use AWS CLI")
+        self.assertNotEqual(args[0], "aws", "Worker must use SDK credential discovery")
         if args[:2] == ["gh", "auth"]:
             return ""
         if args[:3] == ["gh", "pr", "list"]:
@@ -342,7 +324,35 @@ class WorkerTests(WorkerFixture):
         for secret in ("github_pat_synthetic_token", "secret-access", "session-token"):
             self.assertNotIn(secret, logs.getvalue())
 
-    # Stops at each failed stage or final credential check without leaking its exception.
+    # Use SDK discovery only, retaining raw credential redaction without CLI or STS probes.
+    def test_sdk_discovery_replaces_cli_and_identity_probes(self):
+        def capture(args, cwd, env, secrets=None):
+            self.assertNotEqual(
+                args[0], "aws", "Worker must not export CLI credentials"
+            )
+            output = self.external(args, cwd, env, secrets)
+            if args[0] == "./scripts/verify":
+                output += "synthetic-access secret-access session-token\n"
+            return output
+
+        with (
+            patch.object(self.task, "capture", side_effect=capture),
+            patch.object(self.task, "run_agent", side_effect=self.agent),
+            contextlib.redirect_stdout(io.StringIO()) as logs,
+        ):
+            self.task.execute(self.job)
+        self.assertEqual(
+            [call.args[0] for call in self.client_mock.call_args_list],
+            ["secretsmanager"],
+        )
+        self.sdk_credentials.assert_called_once()
+        self.assertNotIn("rotated:", logs.getvalue())
+        self.assertIn("[REDACTED] [REDACTED] [REDACTED]", logs.getvalue())
+        self.assertNotIn("synthetic-access", logs.getvalue())
+        self.assertNotIn("secret-access", logs.getvalue())
+        self.assertNotIn("session-token", logs.getvalue())
+
+    # Stops at each failed stage without leaking its exception.
     def test_stage_failures_stop_coordination_and_final_success(self):
         stages = (
             "prepare_environment",
@@ -352,7 +362,6 @@ class WorkerTests(WorkerFixture):
             "commit_candidate",
             "review_candidate",
             "publish_candidate",
-            "credentials",
         )
         for failed in stages:
             calls = []
@@ -363,7 +372,7 @@ class WorkerTests(WorkerFixture):
                     if name == failed:
                         raise ValueError("secret-value")
                     return {
-                        "prepare_environment": ({}, "initial-access"),
+                        "prepare_environment": {},
                         "prepare_repository": (self.root, "branch"),
                         "invoke_agent": [],
                     }.get(name)
@@ -398,62 +407,37 @@ class WorkerTests(WorkerFixture):
         self.assertEqual(self.agent_calls, 0)
         self.assertEqual(self.prs, [])
 
-    # Rejects administrator identity before secret retrieval or agent work,
-    # enforcing execution-role access rather than borrowed operator privileges.
-    def test_identity_guard_refuses_administrator_before_secret_or_model(self):
-        for account, arn in (
-            (
-                "172318459814",
-                "arn:aws:sts::172318459814:assumed-role/AWSAdministratorAccess/session",
-            ),
-            (
-                "000000000000",
-                "arn:aws:sts::000000000000:assumed-role/software-factory-poc-runtime/session",
-            ),
-            (
-                "000000000000",
-                "arn:aws:sts::172318459814:assumed-role/software-factory-poc-runtime/session",
-            ),
-        ):
-            self.sdk(identity={"Account": account, "Arn": arn, "UserId": "synthetic"})
-            with (
-                self.subTest(account=account, arn=arn),
-                patch.dict(os.environ, self.env),
-                patch.object(self.task, "capture", side_effect=self.external),
-                contextlib.redirect_stdout(io.StringIO()),
-                self.assertRaises(ValueError),
-            ):
-                self.task.execute(self.job)
-            self.assertFalse((self.root / "workspace").exists())
-            self.assertEqual(self.agent_calls, 0)
-        self.assertNotIn(
-            "secretsmanager", [call.args[0] for call in self.client_mock.call_args_list]
+    # Let the SDK accept credentials without a session token or an expiry field.
+    def test_sdk_discovery_accepts_long_lived_credentials(self):
+        self.sdk_credentials.return_value = Credentials(
+            "synthetic-access", "secret-access"
         )
-
-    # Stops setup before SDK access for missing, expired, or malformed CLI credentials.
-    def test_missing_or_expired_cli_credentials_are_rejected(self):
-        for override in (
-            {"AccessKeyId": ""},
-            {"Expiration": "2000-01-01T00:00:00Z"},
-            {"Expiration": "invalid"},
+        with (
+            patch.object(self.task, "capture", side_effect=self.external),
+            patch.object(self.task, "run_agent", side_effect=self.agent),
+            contextlib.redirect_stdout(io.StringIO()),
         ):
+            self.task.execute(self.job)
+        self.assertEqual(self.stages, ["implement", "review", "publish"])
 
-            def invalid(args, cwd, env, secrets=None, override=override):
-                output = self.external(args, cwd, env)
-                if args[:3] == ["aws", "configure", "export-credentials"]:
-                    output = json.dumps({**json.loads(output), **override})
-                return output
-
-            with (
-                self.subTest(override=override),
-                patch.dict(os.environ, self.env),
-                patch.object(self.task, "capture", side_effect=invalid),
-                contextlib.redirect_stdout(io.StringIO()),
-                self.assertRaises((ValueError, TypeError)),
-            ):
-                self.task.execute(self.job)
+    # Missing credentials fail through the SDK request, before checkout or agent work.
+    def test_missing_sdk_credentials_stop_before_repository_or_agent(self):
+        self.sdk_credentials.return_value = None
+        with (
+            patch.object(
+                self.clients["secretsmanager"],
+                "get_secret_value",
+                side_effect=NoCredentialsError(),
+            ),
+            patch.object(self.task, "capture", side_effect=self.external),
+            patch("sys.stdin", io.StringIO(json.dumps(self.job))),
+            contextlib.redirect_stdout(io.StringIO()) as logs,
+        ):
+            self.assertEqual(self.task.main(), 1)
+        self.assertIn("Worker failed: NoCredentialsError", logs.getvalue())
+        self.assertFalse((self.root / "workspace").exists())
         self.assertEqual(self.agent_calls, 0)
-        self.client_mock.assert_not_called()
+        self.assertEqual(self.prs, [])
 
     def test_invalid_sdk_secret_stops_before_repository_or_agent(self):
         for secret in (
@@ -475,12 +459,10 @@ class WorkerTests(WorkerFixture):
         self.assertEqual(self.agent_calls, 0)
 
     def test_sdk_failures_are_sanitized_and_stop_before_repository_or_model(self):
-        for stage in ("identity_error", "secret_error"):
-            self.sdk(
-                **{stage: "github_pat_synthetic_token secret-access session-token"}
-            )
+        for error in ("ExpiredTokenException", "AccessDeniedException"):
+            self.sdk(secret_error=error)
             with (
-                self.subTest(stage=stage),
+                self.subTest(error=error),
                 patch.dict(os.environ, self.env),
                 patch.object(self.task, "capture", side_effect=self.external),
                 patch("sys.stdin", io.StringIO(json.dumps(self.job))),

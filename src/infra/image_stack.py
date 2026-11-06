@@ -183,7 +183,6 @@ class Image(Stack):
                     ("AUTHORIZED_REPOSITORY", repository.value_as_string),
                     ("PR_TARGET_BRANCH", target.value_as_string),
                     ("GITHUB_SECRET_ARN", self.github_secret_arn),
-                    ("EXPECTED_RUNTIME_ROLE", self.runtime.role_name),
                 )
             ],
             hooks=lambda_.CfnMicrovmImage.HooksProperty(

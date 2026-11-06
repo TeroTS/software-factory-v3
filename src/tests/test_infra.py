@@ -334,6 +334,15 @@ class InfrastructureTests(unittest.TestCase):
                 )
 
     def test_repository_authorization_and_target_are_deployment_controlled(self):
+        image = next(
+            iter(
+                self.image_template.find_resources("AWS::Lambda::MicrovmImage").values()
+            )
+        )
+        self.assertNotIn(
+            "EXPECTED_RUNTIME_ROLE",
+            {item["Key"] for item in image["Properties"]["EnvironmentVariables"]},
+        )
         template = self.image_template.to_json()
         self.assertEqual(
             template["Parameters"]["AuthorizedRepository"]["Default"],
