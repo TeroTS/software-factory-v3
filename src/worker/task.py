@@ -360,11 +360,8 @@ def verify_local_candidate(job, repository, branch, reviewed_head, env):
         raise ValueError("Missing nonempty committed change")
 
 
-# Confirm origin and scoped repository access; return settings without trusting agent-selected repository identity.
+# Confirm scoped repository access and return merge settings before authorization or after integration.
 def verify_repository(job, repository, env):
-    remote = capture(["git", "remote", "get-url", "origin"], repository, env).strip()
-    if remote != "https://github.com/" + job["repository"] + ".git":
-        raise ValueError("Repository origin mismatch")
     settings = json.loads(
         capture(["gh", "api", "repos/" + job["repository"]], repository, env)
     )
@@ -377,7 +374,9 @@ def verify_repository(job, repository, env):
 def verify_remote_publication(
     job, repository, branch, head, env, *, merged=False, number=None
 ):
-    verify_repository(job, repository, env)
+    origin = capture(["git", "remote", "get-url", "origin"], repository, env).strip()
+    if origin != "https://github.com/" + job["repository"] + ".git":
+        raise ValueError("Repository origin mismatch")
     remote = capture(
         ["git", "ls-remote", "--heads", "origin", branch], repository, env
     ).split()
@@ -408,44 +407,12 @@ def verify_remote_publication(
     )
 
 
-# Inspect required-only checks with the pinned CLI; its JSON mode exits zero even when checks fail.
-def verify_required_checks(job, repository, branch, number, env):
-    args = [
-        "gh",
-        "pr",
-        "checks",
-        str(number),
-        "--repo",
-        job["repository"],
-        "--required",
-        "--json",
-        "name,bucket",
-    ]
-    try:
-        checks = json.loads(capture(args, repository, env))
-    except subprocess.CalledProcessError as error:
-        # gh 2.103.3 reports an empty required set as exit 1, not JSON; all other errors fail closed.
-        empty = {
-            f"no checks reported on the '{branch}' branch",
-            f"no required checks reported on the '{branch}' branch",
-        }
-        if error.returncode == 1 and (error.stderr or "").strip() in empty:
-            return
-        raise
-    if not isinstance(checks, list) or any(
-        not isinstance(check, dict) or check.get("bucket") not in ("pass", "skipping")
-        for check in checks
-    ):
-        raise ValueError("GitHub required checks are not satisfied")
-
-
 # Authorize one fresh merge process after the worker gate; inspect lost responses without an unchecked retry.
 def merge_candidate(job, repository, branch, head, number, env, secrets):
     verify_local_candidate(job, repository, branch, head, env)
     verify_remote_publication(job, repository, branch, head, env, number=number)
     if verify_repository(job, repository, env).get("allow_merge_commit") is not True:
         raise ValueError("Repository prohibits merge commits")
-    verify_required_checks(job, repository, branch, number, env)
     print(
         "Independent worker gate authorizes merge of PR " + str(number) + " at " + head,
         flush=True,

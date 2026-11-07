@@ -26,6 +26,10 @@ def main():
             "merge-timeout",
             "merge-local-change",
             "merge-head-race",
+            "merge-checks-pending",
+            "merge-checks-fail",
+            "merge-checks-cancel",
+            "merge-checks-error",
         ):
             fixture.agent_calls += 1
             fixture.stages.append("merge")
@@ -241,29 +245,6 @@ def main():
             and scenario == "gate-origin-change"
         ):
             return "https://github.com/wrong/repository.git"
-        if args[:3] == ["gh", "pr", "checks"]:
-            if scenario in (
-                "checks-pending",
-                "checks-fail",
-                "checks-cancel",
-                "checks-unknown",
-            ):
-                return json.dumps(
-                    [{"name": "required", "bucket": scenario.removeprefix("checks-")}]
-                )
-            if scenario in ("checks-absent", "checks-not-required", "checks-error"):
-                branch = fixture.prs[0]["headRefName"]
-                message = {
-                    "checks-absent": f"no checks reported on the '{branch}' branch",
-                    "checks-not-required": f"no required checks reported on the '{branch}' branch",
-                    "checks-error": "GraphQL: forbidden",
-                }[scenario]
-                raise subprocess.CalledProcessError(1, args, "", message)
-            if scenario == "checks-pass":
-                return '[{"name":"required", "bucket":"pass"}, {"name":"neutral", "bucket":"skipping"}]'
-            if scenario == "checks-invalid":
-                return "{}"
-
         if (
             args == ["./scripts/verify"]
             and len(review_heads) == 3

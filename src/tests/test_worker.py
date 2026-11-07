@@ -194,8 +194,9 @@ class WorkerFixture(unittest.TestCase):
         if args[:3] == ["gh", "pr", "list"]:
             self.assertNotIn("baseRefOid", args[args.index("--json") + 1].split(","))
             return json.dumps(self.prs)
-        if args[:3] == ["gh", "pr", "checks"]:
-            return "[]"
+        self.assertNotEqual(
+            args[:3], ["gh", "pr", "checks"], "GitHub owns required-check policy"
+        )
         if args[:2] == ["gh", "api"]:
             return json.dumps(
                 {"full_name": self.job["repository"], "allow_merge_commit": True}
@@ -307,8 +308,15 @@ class WorkerFixture(unittest.TestCase):
 class WorkerTests(WorkerFixture):
     # Completion proves a gated merge of the reviewed head into the real target repository.
     def test_success_requires_independently_verified_merge(self):
+        metadata_stages = []
+
+        def external(args, cwd, env, secrets=None):
+            if args[:2] == ["gh", "api"]:
+                metadata_stages.append(self.stages[-1])
+            return self.external(args, cwd, env, secrets)
+
         with (
-            patch.object(self.task, "capture", side_effect=self.external),
+            patch.object(self.task, "capture", side_effect=external),
             patch.object(self.task, "run_agent", side_effect=self.agent),
             contextlib.redirect_stdout(io.StringIO()) as logs,
         ):
@@ -319,22 +327,24 @@ class WorkerTests(WorkerFixture):
         self.assertEqual(len(parents), 3)
         self.assertEqual(parents[2], self.reviewed_head)
         self.assertIn("Independently confirm merged integration", logs.getvalue())
+        self.assertEqual(metadata_stages, ["publish", "merge"])
 
-    # JSON export exits zero even for failing checks; only required pass/skipped results permit merge.
-    def test_required_check_json_cannot_authorize_pending_or_failed_merge(self):
-        def external(args, cwd, env, secrets=None):
-            if args[:3] == ["gh", "pr", "checks"]:
-                return '[{"name":"test", "bucket":"pending"}]'
-            return self.external(args, cwd, env, secrets)
+    # GitHub owns check policy; a denied exact-head merge must leave the Job incomplete without worker check parsing.
+    def test_github_merge_rejection_cannot_succeed(self):
+        def agent(*args):
+            if "Independent worker gate authorizes merge" in args[1]:
+                self.stages.append("merge")
+                raise subprocess.CalledProcessError(1, ["gh", "pr", "merge"])
+            return self.agent(*args)
 
         with (
-            patch.object(self.task, "capture", side_effect=external),
-            patch.object(self.task, "run_agent", side_effect=self.agent),
+            patch.object(self.task, "capture", side_effect=self.external),
+            patch.object(self.task, "run_agent", side_effect=agent),
             contextlib.redirect_stdout(io.StringIO()),
-            self.assertRaisesRegex(ValueError, "required checks"),
+            self.assertRaisesRegex(ValueError, "identity/phase"),
         ):
             self.task.execute(self.job)
-        self.assertEqual(self.stages, ["implement", "review", "publish"])
+        self.assertEqual(self.stages, ["implement", "review", "publish", "merge"])
         self.assertEqual(self.prs[0]["state"], "OPEN")
 
     # A validated rejection gets a new implementation process and fresh review of the repaired commit.
