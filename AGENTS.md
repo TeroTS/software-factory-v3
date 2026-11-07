@@ -85,6 +85,8 @@ Exemptions:
 
 ## Change Guidelines
 
+Keep `make test` under 30 seconds locally: use focused gate tests for failure
+matrices and retain representative real Git/process integration checks.
 For code changes, run relevant focused tests and `make verify`; report actual
 results and gaps. For documentation-only changes, check affected links,
 formatting, and diagrams without running tests.

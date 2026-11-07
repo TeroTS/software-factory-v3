@@ -30,7 +30,7 @@ checks Python formatting, lint, tests through coverage, and logging.
 | `make format` | Format Python files; modifies files. |
 | `make format-check` | Check Python formatting without changes. |
 | `make lint` | Run Ruff lint checks. |
-| `make test` | Run all discovered `unittest` tests. |
+| `make test` | Run all discovered `unittest` tests; local runtime target under 30 seconds. |
 | `make coverage` | Run tests with branch coverage and report missing lines. |
 | `make dev` | Run the local logging smoke check; not an application server. |
 | `make verify` | Run formatting checks, lint, coverage/tests, and logging. |

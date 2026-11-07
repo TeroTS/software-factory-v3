@@ -24,10 +24,15 @@ AWS lookups or deployment. `make dev` is only a logging check, not a server.
 | `make floci-test` | Start pinned Docker fixtures; test signed HTTP receipt, DynamoDB/Streams dispatcher handoff, and real Standard entry states. |
 | `make floci-down` | Stop local emulator/fixture containers. |
 
+`make test` targets under 30 seconds locally. Failure matrices exercise worker
+validation gates directly; representative integration tests retain real Git,
+script execution, agent subprocesses, and lifecycle HTTP checks. The default
+suite omits repeated cross-process whole-Job outcome matrices.
+
 Focused worker/queue checks:
 
 ```sh
-uv run --locked python -m unittest src.tests.test_receiver src.tests.test_dispatcher src.tests.test_worker src.tests.test_workflow -v
+uv run --locked python -m unittest src.tests.test_receiver src.tests.test_dispatcher src.tests.test_worker src.tests.test_review src.tests.test_workflow -v
 ```
 
 Floci exposes only loopback `http://127.0.0.1:14566`. It is not a full deployed

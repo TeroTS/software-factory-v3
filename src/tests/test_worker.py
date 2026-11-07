@@ -54,6 +54,25 @@ class PublicationTests(unittest.TestCase):
         for prs in ([], [pr, pr], [{}]):
             with self.subTest(prs=prs), self.assertRaises(ValueError):
                 self.task.verify_pr(prs, "factory/task-test", "b" * 40, "release")
+        merged = {**pr, "state": "MERGED", "mergedAt": "now"}
+        self.task.verify_pr(
+            [merged], "factory/task-test", "b" * 40, "release", merged=True, number=2
+        )
+        for changes in (
+            {"state": "OPEN"},
+            {"mergedAt": None},
+            {"number": 3},
+            {"headRefOid": "wrong"},
+        ):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                self.task.verify_pr(
+                    [{**merged, **changes}],
+                    "factory/task-test",
+                    "b" * 40,
+                    "release",
+                    merged=True,
+                    number=2,
+                )
 
 
 class WorkerFixture(unittest.TestCase):
@@ -307,45 +326,54 @@ class WorkerFixture(unittest.TestCase):
 
 
 class WorkerTests(WorkerFixture):
-    # Completion trusts the matching GitHub merged PR state without fetching target history or merge metadata.
-    def test_success_requires_independently_verified_merge(self):
-        metadata_stages = []
-
-        def external(args, cwd, env, secrets=None):
-            if args[:2] == ["gh", "api"]:
-                metadata_stages.append(self.stages[-1])
-            self.assertNotEqual(args[:2], ["git", "fetch"])
-            return self.external(args, cwd, env, secrets)
-
-        with (
-            patch.object(self.task, "capture", side_effect=external),
-            patch.object(self.task, "run_agent", side_effect=self.agent),
-            contextlib.redirect_stdout(io.StringIO()) as logs,
-        ):
-            self.task.execute(self.job)
-        self.assertEqual(self.stages, ["implement", "review", "publish", "merge"])
-        self.assertEqual(self.prs[0]["state"], "MERGED")
-        self.assertEqual(self.prs[0]["headRefOid"], self.reviewed_head)
-        self.assertIn("Independently confirm merged PR", logs.getvalue())
-        self.assertEqual(metadata_stages, ["publish", "merge"])
-
-    # GitHub owns check policy; a denied exact-head merge must leave the Job incomplete without worker check parsing.
+    # Merge failures/lost responses inspect authoritative state once, never retry or bypass the gates.
     def test_github_merge_rejection_cannot_succeed(self):
-        def agent(*args):
-            if "Independent worker gate authorizes merge" in args[1]:
-                self.stages.append("merge")
-                raise subprocess.CalledProcessError(1, ["gh", "pr", "merge"])
-            return self.agent(*args)
-
+        for merged in (False, True):
+            with (
+                self.subTest(merged=merged),
+                patch.object(self.task, "verify_local_candidate") as local,
+                patch.object(self.task, "verify_remote_publication") as remote,
+                patch.object(
+                    self.task,
+                    "verify_repository",
+                    return_value={"allow_merge_commit": True},
+                ),
+                patch.object(
+                    self.task,
+                    "invoke_agent",
+                    side_effect=subprocess.CalledProcessError(1, ["gh", "pr", "merge"]),
+                ) as agent,
+                patch.object(
+                    self.task,
+                    "verify_merged_pr",
+                    side_effect=None if merged else ValueError("PR still open"),
+                ) as confirm,
+                contextlib.redirect_stdout(io.StringIO()) as logs,
+            ):
+                args = (self.job, self.origin, "branch", "b" * 40, 2, self.env, [])
+                if merged:
+                    self.task.merge_candidate(*args)
+                else:
+                    with self.assertRaisesRegex(ValueError, "PR still open"):
+                        self.task.merge_candidate(*args)
+                local.assert_called_once()
+                remote.assert_called_once()
+                agent.assert_called_once()
+                confirm.assert_called_once_with(*args[:-1])
+                self.assertIn("without retry", logs.getvalue())
         with (
-            patch.object(self.task, "capture", side_effect=self.external),
-            patch.object(self.task, "run_agent", side_effect=agent),
-            contextlib.redirect_stdout(io.StringIO()),
-            self.assertRaisesRegex(ValueError, "identity/phase"),
+            patch.object(self.task, "verify_local_candidate"),
+            patch.object(self.task, "verify_remote_publication"),
+            patch.object(
+                self.task,
+                "verify_repository",
+                return_value={"allow_merge_commit": False},
+            ),
+            patch.object(self.task, "invoke_agent") as agent,
+            self.assertRaisesRegex(ValueError, "prohibits merge commits"),
         ):
-            self.task.execute(self.job)
-        self.assertEqual(self.stages, ["implement", "review", "publish", "merge"])
-        self.assertEqual(self.prs[0]["state"], "OPEN")
+            self.task.merge_candidate(*args)
+        agent.assert_not_called()
 
     # A validated rejection gets a new implementation process and fresh review of the repaired commit.
     def test_required_findings_are_repaired_before_fresh_review_and_publication(self):
@@ -423,90 +451,126 @@ class WorkerTests(WorkerFixture):
         self.assertIn("2 of 3", prompts[0])
         self.assertIn(finding["problem"], prompts[0])
 
-    # The review budget belongs to the Job: three valid rejections cannot start a third repair or publish.
+    # Test the real review budget loop without repeated Git commits or agent processes.
     def test_three_required_rejections_exhaust_job_budget(self):
         from src.worker.review import ReviewRejected
 
-        heads = []
-
-        def agent(*args):
-            self.agent(*args)
-            cli, prompt, repository, _env, _secrets = args
-            if self.stages[-1] == "implement" and heads:
-                self.assertIn(heads[-1], prompt)
-                (repository / "untracked.txt").write_text(f"repair {len(heads)}\n")
-            elif self.stages[-1] == "review":
-                heads.append(self.reviewed_head)
-                output = Path(cli[cli.index("--output-last-message") + 1])
-                output.write_text(
-                    json.dumps(
-                        {
-                            "candidateHead": heads[-1],
-                            "verdict": "FAIL",
-                            "findings": [
-                                {
-                                    "axis": "Spec",
-                                    "location": "greeting.txt:1",
-                                    "problem": "Detail missing",
-                                    "correction": "Add required detail",
-                                }
-                            ],
-                        }
-                    )
-                )
-
+        finding = {
+            "axis": "Spec",
+            "location": "greeting.txt:1",
+            "problem": "Detail missing",
+            "correction": "Add required detail",
+        }
         with (
-            patch.object(self.task, "capture", side_effect=self.external),
-            patch.object(self.task, "run_agent", side_effect=agent),
-            contextlib.redirect_stdout(io.StringIO()),
+            patch.object(
+                self.task, "review_candidate", return_value=("FAIL", [finding])
+            ) as review,
+            patch.object(self.task, "invoke_agent") as agent,
+            patch.object(self.task, "verify_candidate") as verify,
+            patch.object(
+                self.task, "commit_candidate", side_effect=["c" * 40, "d" * 40]
+            ) as commit,
             self.assertRaisesRegex(ReviewRejected, "budget exhausted"),
         ):
-            self.task.execute(self.job)
-        self.assertEqual(self.stages, ["implement", "review"] * 3)
-        self.assertEqual(len(set(heads)), 3)
-        self.assertEqual(self.events.count("./scripts/verify"), 4)
-        self.assertFalse(self.prs)
+            self.task.review_and_repair_candidate(
+                self.job, self.origin, "branch", "b" * 40, self.env, []
+            )
+        self.assertEqual(
+            [call.args[3] for call in review.call_args_list],
+            [letter * 40 for letter in "bcd"],
+        )
+        self.assertEqual(agent.call_count, 2)
+        self.assertEqual(verify.call_count, 2)
+        self.assertEqual(commit.call_count, 2)
+        for call, head in zip(agent.call_args_list, ("b" * 40, "c" * 40), strict=True):
+            self.assertIn(head, call.kwargs["prompt"])
+            self.assertIn(finding["problem"], call.kwargs["prompt"])
 
-    # Results copied from a previous candidate cannot authorize another repair or publication.
+    # An unreliable second review cannot authorize another repair; stale evidence validation is tested separately.
     def test_stale_review_result_after_repair_is_terminal(self):
         from src.worker.review import ReviewError
 
-        first_head = None
         finding = {
             "axis": "Spec",
             "location": "greeting.txt:1",
             "problem": "Missing detail",
             "correction": "Add detail",
         }
-
-        def agent(*args):
-            nonlocal first_head
-            self.agent(*args)
-            cli, _prompt, repository, _env, _secrets = args
-            if self.stages[-1] == "implement" and first_head:
-                (repository / "repair.txt").write_text("detail\n")
-            elif self.stages[-1] == "review":
-                first_head = first_head or self.reviewed_head
-                output = Path(cli[cli.index("--output-last-message") + 1])
-                output.write_text(
-                    json.dumps(
-                        {
-                            "candidateHead": first_head,
-                            "verdict": "FAIL",
-                            "findings": [finding],
-                        }
-                    )
-                )
-
         with (
-            patch.object(self.task, "capture", side_effect=self.external),
-            patch.object(self.task, "run_agent", side_effect=agent),
-            contextlib.redirect_stdout(io.StringIO()),
+            patch.object(
+                self.task,
+                "review_candidate",
+                side_effect=[
+                    ("FAIL", [finding]),
+                    ReviewError("Stale review candidate identity"),
+                ],
+            ) as review,
+            patch.object(self.task, "invoke_agent") as agent,
+            patch.object(self.task, "verify_candidate") as verify,
+            patch.object(
+                self.task, "commit_candidate", return_value="c" * 40
+            ) as commit,
             self.assertRaisesRegex(ReviewError, "Stale"),
         ):
-            self.task.execute(self.job)
-        self.assertEqual(self.stages, ["implement", "review", "implement", "review"])
-        self.assertFalse(self.prs)
+            self.task.review_and_repair_candidate(
+                self.job, self.origin, "branch", "b" * 40, self.env, []
+            )
+        self.assertEqual(review.call_count, 2)
+        agent.assert_called_once()
+        verify.assert_called_once()
+        commit.assert_called_once()
+
+    # Review failures and mutations fail at their real gate without replaying implementation and publication.
+    def test_reviewer_process_failure_or_mutation_rejects_candidate(self):
+        from src.worker.review import ReviewError
+
+        head, branch = "b" * 40, "factory/task-test"
+        for error in (
+            subprocess.CalledProcessError(7, ["codex", "exec"]),
+            OSError("private"),
+        ):
+            with (
+                self.subTest(error=type(error).__name__),
+                patch.object(self.task, "invoke_agent", side_effect=error),
+                contextlib.redirect_stdout(io.StringIO()),
+                self.assertRaisesRegex(ReviewError, "Reviewer process failed"),
+            ):
+                self.task.review_candidate(
+                    self.job, self.origin, branch, head, self.env, []
+                )
+        for replies in (("wrong",), (head, "wrong"), (head, branch, "?? review.txt")):
+            with (
+                self.subTest(replies=replies),
+                patch.object(self.task, "capture", side_effect=replies),
+                self.assertRaisesRegex(ReviewError, "Reviewer changed candidate"),
+            ):
+                self.task.verify_review_unchanged(self.origin, branch, head, self.env)
+
+    # Publication process uncertainty inspects existing state exactly once rather than creating another PR.
+    def test_ambiguous_publication_is_inspected_without_retry(self):
+        for exists in (False, True):
+            with (
+                self.subTest(exists=exists),
+                patch.object(
+                    self.task, "invoke_agent", side_effect=OSError("private")
+                ) as agent,
+                patch.object(
+                    self.task,
+                    "verify_completion",
+                    side_effect=None if exists else ValueError("Missing PR"),
+                    return_value={"number": 2},
+                ) as verify,
+                contextlib.redirect_stdout(io.StringIO()) as logs,
+            ):
+                args = (self.job, self.origin, "branch", "b" * 40, self.env, [])
+                if exists:
+                    self.assertEqual(self.task.publish_candidate(*args), {"number": 2})
+                else:
+                    with self.assertRaisesRegex(ValueError, "Missing PR"):
+                        self.task.publish_candidate(*args)
+                agent.assert_called_once()
+                verify.assert_called_once_with(*args[:-1])
+                self.assertIn("without retry", logs.getvalue())
 
     # Missing image policy must fail before invoking the agent rather than loading unsafe defaults.
     def test_missing_factory_configuration_stops_before_agent(self):
@@ -525,6 +589,7 @@ class WorkerTests(WorkerFixture):
 
         def capture(args, cwd, env, secrets=None):
             calls.append(args[0])
+            self.assertNotEqual(args[:2], ["git", "fetch"])
             return self.external(args, cwd, env, secrets)
 
         def agent(*args):
@@ -557,6 +622,9 @@ class WorkerTests(WorkerFixture):
         self.assertEqual(self.stages, ["implement", "review", "publish", "merge"])
         self.assertEqual(self.agent_calls, 4)
         self.assertEqual(len(self.prs), 1)
+        self.assertEqual(self.prs[0]["state"], "MERGED")
+        self.assertEqual(self.prs[0]["headRefOid"], self.reviewed_head)
+        self.assertIn("Independently confirm merged PR", logs.getvalue())
         for stubber in self.stubbers.values():
             stubber.assert_no_pending_responses()
         self.assertIn("exit code 0", logs.getvalue())
@@ -579,7 +647,9 @@ class WorkerTests(WorkerFixture):
             patch.object(self.task, "run_agent", side_effect=self.agent),
             contextlib.redirect_stdout(io.StringIO()) as logs,
         ):
-            self.task.execute(self.job)
+            secrets = []
+            env = self.task.prepare_environment(secrets)
+            self.task.logged(["./scripts/verify"], self.origin, env, secrets)
         self.assertEqual(
             [call.args[0] for call in self.client_mock.call_args_list],
             ["secretsmanager"],
@@ -669,8 +739,14 @@ class WorkerTests(WorkerFixture):
             patch.object(self.task, "run_agent", side_effect=self.agent),
             contextlib.redirect_stdout(io.StringIO()),
         ):
-            self.task.execute(self.job)
-        self.assertEqual(self.stages, ["implement", "review", "publish", "merge"])
+            secrets = []
+            env = self.task.prepare_environment(secrets)
+        self.assertEqual(env["GH_TOKEN"], "github_pat_synthetic_token")
+        self.assertEqual(self.task.redact("secret-access", secrets), "[REDACTED]")
+        self.assertEqual(
+            secrets,
+            ["synthetic-access", "secret-access", None, "github_pat_synthetic_token"],
+        )
 
     # Missing credentials fail through the SDK request, before checkout or agent work.
     def test_missing_sdk_credentials_stop_before_repository_or_agent(self):
@@ -732,37 +808,60 @@ class WorkerTests(WorkerFixture):
         self.assertEqual(self.agent_calls, 0)
         self.assertEqual(self.prs, [])
 
-    # Rejects publication claims contradicted by remote/local Git or PR checks,
-    # enforcing meaningful scoped changes on a task branch rather than trusting the agent.
+    # Exercise the real publication gate directly instead of rerunning implementation/review for every contradiction.
     def test_contradictory_independent_git_and_pr_evidence_rejects_success(self):
-        replies = (
-            (["git", "ls-remote"], "wrong refs/heads/task"),
-            (["git", "status"], " M greeting.txt"),
-            (["git", "diff"], ""),
-            (["git", "branch"], "release\n"),
-            (["git", "rev-parse"], self.sha + "\n"),
-            (["gh", "pr"], "[]"),
-        )
-        for index, (prefix, reply) in enumerate(replies):
-            self.sdk()
-
-            def contradict(
-                args, cwd, env, secrets=None, index=index, prefix=prefix, reply=reply
+        head, branch = "b" * 40, "factory/task-test"
+        pr = {
+            "number": 2,
+            "state": "OPEN",
+            "mergedAt": None,
+            "isCrossRepository": False,
+            "baseRefName": "release",
+            "headRefName": branch,
+            "headRefOid": head,
+        }
+        evidence = {
+            ("git", "rev-parse"): head,
+            ("git", "branch"): branch,
+            ("git", "merge-base"): "",
+            ("git", "status"): "",
+            ("git", "diff"): "greeting.txt\n",
+            ("git", "remote"): self.clone_url,
+            ("git", "ls-remote"): head + " refs/heads/" + branch,
+            ("gh", "pr"): json.dumps([pr]),
+        }
+        with (
+            patch.object(
+                self.task,
+                "capture",
+                side_effect=lambda args, *_: evidence[tuple(args[:2])],
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(
+                self.task.verify_completion(
+                    self.job, self.origin, branch, head, self.env
+                ),
+                pr,
+            )
+            for prefix, reply in (
+                (("git", "ls-remote"), "wrong refs/heads/task"),
+                (("git", "remote"), "https://github.com/wrong/repository.git"),
+                (("git", "status"), " M greeting.txt"),
+                (("git", "diff"), ""),
+                (("git", "branch"), "release"),
+                (("git", "rev-parse"), self.sha),
+                (("git", "rev-parse"), "c" * 40),
+                (("gh", "pr"), "[]"),
             ):
-                if self.stages and self.stages[-1] == "publish" and args[:2] == prefix:
-                    return reply
-                return self.external(args, cwd, env)
-
-            env = {**self.env, "WORKSPACE": str(self.root / ("failure-" + str(index)))}
-            with (
-                self.subTest(prefix=prefix),
-                patch.dict(os.environ, env),
-                patch.object(self.task, "capture", side_effect=contradict),
-                patch.object(self.task, "run_agent", side_effect=self.agent),
-                contextlib.redirect_stdout(io.StringIO()),
-                self.assertRaises(ValueError),
-            ):
-                self.task.execute(self.job)
+                with (
+                    self.subTest(prefix=prefix, reply=reply),
+                    patch.dict(evidence, {prefix: reply}),
+                    self.assertRaises(ValueError),
+                ):
+                    self.task.verify_completion(
+                        self.job, self.origin, branch, head, self.env
+                    )
 
     # Advancing the real target branch must not invalidate work descended from the pinned baseline.
     def test_target_branch_can_advance_during_agent_work(self):
@@ -786,31 +885,18 @@ class WorkerTests(WorkerFixture):
         self.assertEqual(self.agent_calls, 4)
         self.assertIn("Verified repository script", logs.getvalue())
 
-    # Reject a task whose final commit does not descend from the pinned baseline.
+    # Real Git rejects an unrelated commit at the local gate without replaying the entire worker.
     def test_completion_requires_pinned_baseline_ancestry(self):
-        def agent(*args):
-            self.agent(*args)
-            if self.stages[-1] != "implement":
-                return
-            repository, env = args[2:4]
-            tree = self.external(
-                ["git", "rev-parse", "HEAD^{tree}"], repository, env
-            ).strip()
-            orphan = subprocess.check_output(
-                ["git", "commit-tree", tree, "-m", "unrelated task"],
-                cwd=repository,
-                env=env,
-                text=True,
-            ).strip()
-            self.external(["git", "update-ref", "HEAD", orphan], repository, env)
-
+        tree = self.git("rev-parse", "HEAD^{tree}").strip()
+        orphan = self.git("commit-tree", tree, "-m", "unrelated task").strip()
+        self.git("update-ref", "HEAD", orphan)
         with (
             patch.object(self.task, "capture", side_effect=self.external),
-            patch.object(self.task, "run_agent", side_effect=agent),
-            contextlib.redirect_stdout(io.StringIO()),
             self.assertRaises(subprocess.CalledProcessError) as failure,
         ):
-            self.task.execute(self.job)
+            self.task.verify_local_candidate(
+                self.job, self.origin, "release", orphan, self.env
+            )
         self.assertEqual(
             failure.exception.cmd[:3], ["git", "merge-base", "--is-ancestor"]
         )
@@ -887,75 +973,73 @@ class WorkerTests(WorkerFixture):
         self.assertIn("actual exit code 7", logs.getvalue())
         self.assertNotIn("session-token", logs.getvalue())
 
+    # Use real script files and execution, but omit repeated cloning/committing for the preparation failure matrix.
     def test_scripts_fail_before_agent_for_missing_nonexecutable_and_nonzero(self):
-        for index, (script, failure) in enumerate(
-            (script, failure)
-            for script in ("setup", "verify")
-            for failure in ("missing", "nonexecutable", "nonzero")
-        ):
-            self.sdk()
-            path = self.origin / "scripts" / script
+        repository = self.root / "repository"
+        (repository / "scripts").mkdir(parents=True)
+        (repository / "greeting.txt").write_text("hello\n")
+        for script in ("setup", "verify"):
+            target = repository / "scripts" / script
+            target.write_text((self.origin / "scripts" / script).read_text())
+            target.chmod(0o755)
+        # Keep the real capture for scripts while replacing only Git setup commands.
+        real_capture = self.task.capture
+
+        def capture(args, cwd, env, secrets=None):
+            return "" if args[0] == "git" else real_capture(args, cwd, env, secrets)
+
+        for script in ("setup", "verify"):
+            path = repository / "scripts" / script
             original = path.read_text()
-            if failure == "missing":
-                path.unlink()
-            elif failure == "nonexecutable":
-                path.chmod(0o644)
-            else:
-                path.write_text(
-                    "#!/bin/sh\necho github_pat_synthetic_token >&2\nexit 7\n"
-                )
-            self.git("add", ".")
-            self.git("commit", "-m", "script failure")
-            sha = self.git("rev-parse", "HEAD").strip()
-            env = {**self.env, "WORKSPACE": str(self.root / ("script-" + str(index)))}
-            with (
-                self.subTest(script=script, failure=failure),
-                patch.dict(os.environ, env),
-                patch.object(self.task, "capture", side_effect=self.external),
-                patch.object(self.task, "run_agent", side_effect=self.agent),
-                contextlib.redirect_stdout(io.StringIO()) as logs,
-                self.assertRaises(
-                    (ValueError, subprocess.CalledProcessError)
-                ) as failure_result,
-            ):
-                self.task.execute({**self.job, "baseSha": sha})
-            if failure == "nonzero":
-                self.assertEqual(failure_result.exception.returncode, 7)
-            else:
-                self.assertIsInstance(failure_result.exception, ValueError)
-                self.assertIn("./scripts/" + script, str(failure_result.exception))
-                self.assertIn(
-                    "Missing or non-executable repository script: ./scripts/" + script,
-                    logs.getvalue(),
-                )
-            self.assertEqual(self.agent_calls, 0)
-            self.assertEqual(self.prs, [])
-            self.assertNotIn("github_pat_synthetic_token", logs.getvalue())
-            path.write_text(original)
-            path.chmod(0o755)
-
-    def test_independent_verification_failure_prevents_review_and_publication(self):
-        for index, failure in enumerate(("missing", "nonexecutable", "nonzero")):
-            self.sdk()
-
-            def agent(*args, failure=failure):
-                result = self.agent(*args)
-                script = args[2] / "scripts/verify"
+            for failure in ("missing", "nonexecutable", "nonzero"):
                 if failure == "missing":
-                    script.unlink()
+                    path.unlink()
                 elif failure == "nonexecutable":
-                    script.chmod(0o644)
+                    path.chmod(0o644)
                 else:
-                    (args[2] / "greeting.txt").write_text("")
-                return result
+                    path.write_text(
+                        "#!/bin/sh\necho github_pat_synthetic_token >&2\nexit 7\n"
+                    )
+                with (
+                    self.subTest(script=script, failure=failure),
+                    patch.object(self.task, "capture", side_effect=capture),
+                    contextlib.redirect_stdout(io.StringIO()) as logs,
+                    self.assertRaises(
+                        (ValueError, subprocess.CalledProcessError)
+                    ) as error,
+                ):
+                    self.task.prepare_repository(
+                        self.job,
+                        {**self.env, "WORKSPACE": str(self.root)},
+                        ["github_pat_synthetic_token"],
+                    )
+                if failure == "nonzero":
+                    self.assertEqual(error.exception.returncode, 7)
+                else:
+                    self.assertIn(
+                        "Missing or non-executable repository script: ./scripts/"
+                        + script,
+                        str(error.exception),
+                    )
+                self.assertNotIn("github_pat_synthetic_token", logs.getvalue())
+                path.write_text(original)
+                path.chmod(0o755)
 
+    # Candidate-script failures are tested at their gate; coordination failure ordering is covered separately.
+    def test_independent_verification_failure_prevents_review_and_publication(self):
+        script = self.origin / "scripts/verify"
+        original = script.read_text()
+        for failure in ("missing", "nonexecutable", "nonzero"):
+            script.write_text(original)
+            script.chmod(0o755)
+            if failure == "missing":
+                script.unlink()
+            elif failure == "nonexecutable":
+                script.chmod(0o644)
+            else:
+                (self.origin / "greeting.txt").write_text("")
             with (
                 self.subTest(failure=failure),
-                patch.dict(
-                    os.environ, {"WORKSPACE": str(self.root / ("final-" + str(index)))}
-                ),
-                patch.object(self.task, "capture", side_effect=self.external),
-                patch.object(self.task, "run_agent", side_effect=agent),
                 contextlib.redirect_stdout(io.StringIO()) as logs,
                 self.assertRaises(
                     subprocess.CalledProcessError
@@ -963,7 +1047,7 @@ class WorkerTests(WorkerFixture):
                     else ValueError
                 ) as error,
             ):
-                self.task.execute(self.job)
+                self.task.verify_candidate(self.origin, self.env, [])
             if failure == "nonzero":
                 self.assertEqual(error.exception.returncode, 1)
             else:
@@ -972,8 +1056,6 @@ class WorkerTests(WorkerFixture):
                     "Missing or non-executable repository script: ./scripts/verify",
                     logs.getvalue(),
                 )
-            self.assertEqual(self.agent_calls, index + 1)
-            self.assertEqual(len(self.prs), 0)
 
     def test_invalid_target_branch_stops_before_scripts_or_agent(self):
         with (
