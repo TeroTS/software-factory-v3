@@ -77,7 +77,7 @@ Final review PASS on pass {review_count} of 3. Earlier required findings address
 Do not edit source, rerun verification, stage, or create a replacement commit.
 Push only {branch} to origin (never force-push or push the target); run gh pr create only if no PR already exists for it.
 Create exactly one PR targeting {target}, left open and unmerged.
-Use Summary, Evidence, Review, and Merge Danger sections, citing actual verification and the review verdict/commit.
+Use only Summary and Evidence sections; follow the canonical PR skill for body content.
 Disclose skipped checks/material risks; AI review is not proof of correctness or compatibility with an advancing target.
 Inspect existing branch/PR state before publishing and after any ambiguous response using git ls-remote and gh pr list/view.
 Do not blindly create duplicates, retry publication, or merge. Return if publication cannot be confirmed.

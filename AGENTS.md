@@ -88,3 +88,7 @@ Exemptions:
 For code changes, run relevant focused tests and `make verify`; report actual
 results and gaps. For documentation-only changes, check affected links,
 formatting, and diagrams without running tests.
+
+Run `make synth` only for CDK/infrastructure, asset-staging, or deployment
+configuration changes. Routine application-code or skill-content edits do not
+require synthesis merely because those files are packaged as deployment assets.

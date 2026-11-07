@@ -287,6 +287,8 @@ class WorkerFixture(unittest.TestCase):
         self.events.append("publish")
         self.assertIn("/opt/factory/skills/pr/SKILL.md", prompt)
         self.assertIn("gh pr create", prompt)
+        self.assertIn("Use only Summary and Evidence sections", prompt)
+        self.assertNotIn("Summary, Evidence, Review, and Merge Danger", prompt)
         self.assertIn("targeting release", prompt)
         self.assertEqual(head, self.reviewed_head)
         self.external(["git", "push", "origin", "HEAD"], cwd, env)
