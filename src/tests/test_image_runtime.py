@@ -18,6 +18,18 @@ class ImageRuntimeTests(unittest.TestCase):
         self.assertIn("COPY src/__init__.py /opt/factory/src/__init__.py", dockerfile)
         self.assertIn("COPY src/worker /opt/factory/src/worker", dockerfile)
 
+    def test_image_installs_pinned_docker_for_factory_scripts(self):
+        root = Path(__file__).resolve().parents[2]
+        dockerfile = (root / "image/Dockerfile").read_text()
+        self.assertIn("docker-29.9.3.tgz", dockerfile)
+        self.assertIn("v5.7.0/docker-compose-linux-aarch64", dockerfile)
+        self.assertIn("groupadd docker", dockerfile)
+        self.assertIn("usermod -aG docker factory", dockerfile)
+        self.assertIn("HOME=/home/factory", dockerfile)
+        self.assertIn("USER root", dockerfile)
+        self.assertNotIn("compose_experiment", dockerfile)
+        self.assertNotIn("compose_probe", dockerfile)
+
     # Static policy is packaged separately from credentials and owned by root in the image.
     def test_image_packages_factory_codex_policy(self):
         root = Path(__file__).resolve().parents[2]

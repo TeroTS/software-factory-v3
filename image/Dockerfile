@@ -18,15 +18,28 @@ RUN npm install --prefix /opt/codex --no-audit --no-fund @openai/codex@0.166.0 \
     && npm cache clean --force
 ENV PATH=/opt/codex/node_modules/.bin:$PATH
 
+# Install versioned ARM64 Engine/CLI and Compose; the lifecycle server starts the daemon only after resume.
+RUN dnf install -y iptables-nft-1.8.8-3.amzn2023.0.2 iproute-6.10.0-319.amzn2023.0.1 util-linux-2.37.4-1.amzn2023.0.7 tar-1.34-1.amzn2023.0.4 gzip-1.12-1.amzn2023.0.1 \
+    && dnf clean all \
+    && curl -fsSL https://download.docker.com/linux/static/stable/aarch64/docker-29.9.3.tgz -o /tmp/docker.tgz \
+    && tar -xzf /tmp/docker.tgz -C /usr/local/bin --strip-components=1 \
+    && rm /tmp/docker.tgz \
+    && mkdir -p /usr/local/lib/docker/cli-plugins \
+    && curl -fsSL https://github.com/docker/compose/releases/download/v5.7.0/docker-compose-linux-aarch64 -o /usr/local/lib/docker/cli-plugins/docker-compose \
+    && chmod 755 /usr/local/lib/docker/cli-plugins/docker-compose \
+    && docker --version \
+    && docker compose version
 RUN useradd --create-home factory \
+    && groupadd docker \
+    && usermod -aG docker factory \
     && mkdir /workspace \
     && chown factory:factory /workspace
 WORKDIR /opt/factory
 COPY src/__init__.py /opt/factory/src/__init__.py
 COPY src/worker /opt/factory/src/worker
-# Root-owned managed policy cannot be overwritten by the worker or cloned repository.
+# Managed policy is root-owned; Docker socket access gives factory root-equivalent control inside the VM.
 COPY image/managed_config.toml /etc/codex/managed_config.toml
-# Canonical factory skills are immutable to the worker; native discovery points to this bundle.
+# Canonical factory skills are root-owned; native discovery points to this bundle.
 COPY image/skills/implement/ /opt/factory/skills/implement/
 COPY image/skills/code-review/ /opt/factory/skills/code-review/
 COPY image/skills/pr/ /opt/factory/skills/pr/
@@ -34,7 +47,8 @@ COPY image/skills/tdd/ /opt/factory/skills/tdd/
 RUN chmod -R a=rX /opt/factory/skills \
     && mkdir -p /home/factory/.agents \
     && ln -s /opt/factory/skills /home/factory/.agents/skills
-ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 WORKSPACE=/workspace AWS_REGION=us-east-1
-USER factory
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 WORKSPACE=/workspace AWS_REGION=us-east-1 HOME=/home/factory
+# Only the lifecycle supervisor/daemon run as root; worker and validation subprocesses drop to factory.
+USER root
 EXPOSE 8080
 CMD ["python3.13", "-m", "src.worker.server"]

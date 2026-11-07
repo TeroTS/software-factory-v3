@@ -1,7 +1,8 @@
-# Serve snapshot-safe lifecycle hooks and one job's status; only run starts work.
+# Supervise post-resume Docker and one factory-user worker; build hooks never start either.
 import http.server
 import json
 import os
+import pwd
 import re
 import shutil
 import signal
@@ -9,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 HOOK = "/aws/lambda-microvms/runtime/v1/"
@@ -50,23 +52,69 @@ def parse_job(envelope):
     return job
 
 
-# Own one asynchronous process group; worker exit zero requires task verification.
+# Drop root supervisor privileges for worker/sandbox subprocesses; local non-root callers keep their identity.
+def worker_options():
+    return (
+        {"user": "factory", "group": "factory", "extra_groups": ["docker"]}
+        if os.geteuid() == 0
+        else {}
+    )
+
+
+# Wait as factory for Docker socket access before repository work; fail within a bounded startup deadline.
+def wait_for_docker():
+    deadline = time.monotonic() + 45
+    while time.monotonic() < deadline:
+        try:
+            result = subprocess.run(
+                ["docker", "info"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+            )
+            if result.returncode == 0:
+                return
+        except subprocess.TimeoutExpired:
+            pass
+        time.sleep(0.2)
+    raise OSError("Docker daemon readiness timed out")
+
+
+# Own Docker and one asynchronous worker group; worker exit zero requires task verification.
 class Runtime:
     # Keep build-time state empty; workspace and deployment settings carry no token.
     def __init__(self, workspace):
         self.workspace = Path(workspace)
         self.process = None
+        self.docker = None
         self.started = False
         self.terminal = None
         self.lock = threading.RLock()
 
     # Check tools and real workspace-write sandbox execution without credentials/network calls.
     def validate(self):
-        for tool in (sys.executable, "git", "gh", "codex", "bwrap", "rg", "aws"):
+        for tool in (
+            sys.executable,
+            "git",
+            "gh",
+            "codex",
+            "bwrap",
+            "rg",
+            "aws",
+            "dockerd",
+            "docker",
+        ):
             if shutil.which(tool) is None:
                 raise OSError("Missing required executable")
         with tempfile.TemporaryDirectory(dir=self.workspace) as directory:
-            (Path(directory) / ".codex").mkdir()
+            home = Path(directory) / ".codex"
+            home.mkdir()
+            options = worker_options()
+            if options:
+                factory = pwd.getpwnam("factory")
+                for path in (directory, home):
+                    os.chown(path, factory.pw_uid, factory.pw_gid)
             result = subprocess.run(
                 [
                     "codex",
@@ -91,28 +139,38 @@ class Runtime:
                 capture_output=True,
                 text=True,
                 timeout=10,
+                **options,
             )
             if result.stdout.strip() != "sandbox-validation-ok":
                 raise OSError("Sandbox probe did not execute")
         print("Image validation: workspace-write sandbox shell passed", flush=True)
 
-    # Spawn once with JSON on stdin, returning promptly; startup errors stay terminal.
+    # Spawn the root daemon after resume without delaying the run hook; the factory worker checks readiness.
+    def start_docker(self):
+        self.docker = subprocess.Popen(
+            ["dockerd", "--host=unix:///var/run/docker.sock", "--group=docker"],
+            start_new_session=True,
+        )
+
+    # Start Docker then spawn factory once with JSON on stdin; startup failures stay terminal.
     def start(self, job):
         with self.lock:
             if self.started:
                 raise RuntimeError("Job already initialized")
             self.started = True
             try:
+                self.start_docker()
                 self.process = subprocess.Popen(
                     [sys.executable, "-m", "src.worker.task"],
                     stdin=subprocess.PIPE,
                     start_new_session=True,
                     text=True,
                     env={**os.environ, "WORKSPACE": str(self.workspace)},
+                    **worker_options(),
                 )
                 self.process.stdin.write(json.dumps(job))
                 self.process.stdin.close()
-            except (OSError, ValueError):
+            except (OSError, ValueError, subprocess.SubprocessError):
                 self.terminal = "error"
                 self.terminate()
                 raise
@@ -126,22 +184,27 @@ class Runtime:
                     self.terminal = "ok" if code == 0 else "error"
             return self.terminal or "pending"
 
-    # Stop the entire worker group with bounded escalation and flush server output.
+    # Stop worker and Docker groups within the 15-second hook budget; preserve terminal worker status.
     def terminate(self):
         with self.lock:
             self.status()
-            if self.process is not None:
+            for process, timeout in ((self.process, 5), (self.docker, 2)):
+                if process is None:
+                    continue
                 try:
-                    os.killpg(self.process.pid, signal.SIGTERM)
+                    os.killpg(process.pid, signal.SIGTERM)
                 except ProcessLookupError:
                     pass
                 try:
-                    self.process.wait(timeout=5)
+                    process.wait(timeout=timeout)
                 except subprocess.TimeoutExpired:
-                    os.killpg(self.process.pid, signal.SIGKILL)
-                    self.process.wait(timeout=5)
-                if self.terminal is None:
-                    self.terminal = "error"
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    process.wait(timeout=timeout)
+            if self.process is not None and self.terminal is None:
+                self.terminal = "error"
             sys.stdout.flush()
             sys.stderr.flush()
 
