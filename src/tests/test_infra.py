@@ -397,10 +397,6 @@ class InfrastructureTests(unittest.TestCase):
                 "image/skills/tdd/tests.md",
                 "image/skills/tdd/mocking.md",
                 "image/skills/tdd/agents/openai.yaml",
-                "image/skills/codebase-design/SKILL.md",
-                "image/skills/codebase-design/DEEPENING.md",
-                "image/skills/codebase-design/DESIGN-IT-TWICE.md",
-                "image/skills/codebase-design/agents/openai.yaml",
             },
         )
         root = Path(__file__).resolve().parents[2]

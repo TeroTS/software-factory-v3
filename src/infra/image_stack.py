@@ -38,7 +38,6 @@ def stage_source(outdir):
         "code-review": (),
         "pr": ("CREDITS.md",),
         "tdd": ("tests.md", "mocking.md"),
-        "codebase-design": ("DEEPENING.md", "DESIGN-IT-TWICE.md"),
     }
     for name, references in skills.items():
         relative = Path("image/skills") / name

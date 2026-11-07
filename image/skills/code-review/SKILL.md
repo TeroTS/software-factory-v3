@@ -30,7 +30,7 @@ Outside the worker, report Standards and Spec separately with concrete locations
 
 ## Design judgement
 
-Treat these as heuristics, not mandatory refactoring rules: mysterious names, duplicated logic, feature envy, data clumps, primitive obsession, repeated conditionals, shotgun surgery, divergent change, speculative generality, message chains, middle men, and refused inheritance. Flag only concrete problems relevant to this task; repository standards override generic preferences. Read [codebase-design](../codebase-design/SKILL.md) when seam/interface vocabulary is needed. Optional architecture exploration is not part of ordinary review.
+Treat these as heuristics, not mandatory refactoring rules: mysterious names, duplicated logic, feature envy, data clumps, primitive obsession, repeated conditionals, shotgun surgery, divergent change, speculative generality, message chains, middle men, and refused inheritance. Flag only concrete problems relevant to this task; repository standards override generic preferences. Optional architecture exploration is not part of ordinary review.
 
 ## Required capabilities
 

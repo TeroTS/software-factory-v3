@@ -31,7 +31,6 @@ COPY image/skills/implement/ /opt/factory/skills/implement/
 COPY image/skills/code-review/ /opt/factory/skills/code-review/
 COPY image/skills/pr/ /opt/factory/skills/pr/
 COPY image/skills/tdd/ /opt/factory/skills/tdd/
-COPY image/skills/codebase-design/ /opt/factory/skills/codebase-design/
 RUN chmod -R a=rX /opt/factory/skills \
     && mkdir -p /home/factory/.agents \
     && ln -s /opt/factory/skills /home/factory/.agents/skills

@@ -21,7 +21,7 @@ A **seam** is the public boundary you test at: the interface where you observe b
 
 **Test only at agreed public seams.** Record the seams under test and what they catch or miss. In an unattended factory Job, use task-specified or existing public interfaces and tests without waiting for interactive approval. If a new product/interface decision is necessary or essential requirements are missing, report a blocked outcome and return to the worker rather than inventing a requirement. In an interactive session, confirm new seams with the user before writing tests.
 
-When interface shape or seam placement needs clarification, read [codebase-design](../codebase-design/SKILL.md) for the shared module, interface, depth, seam, adapter, leverage and locality vocabulary. It is a reference to consult, not a redesign session to run. Read bundled references directly; no Skill tool is required.
+Test behavior through task-specified or existing public interfaces; don't introduce abstractions solely for testing. Read bundled references directly; no Skill tool is required.
 
 ## Anti-patterns
 

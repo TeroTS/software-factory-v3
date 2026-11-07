@@ -165,7 +165,6 @@ ignore_default_excludes = false
             "code-review": (),
             "pr": ("CREDITS.md",),
             "tdd": ("tests.md", "mocking.md"),
-            "codebase-design": ("DEEPENING.md", "DESIGN-IT-TWICE.md"),
         }
         expected = set(references)
         self.assertEqual(os.getuid(), pwd.getpwnam("factory").pw_uid)
