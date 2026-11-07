@@ -1,0 +1,21 @@
+
+# Experimental-only root supervisor; the actual sandbox/model workers run as factory.
+USER root
+RUN dnf install -y iptables-nft-1.8.8-3.amzn2023.0.2 iproute-6.10.0-319.amzn2023.0.1 procps-ng-3.3.17-1.amzn2023.0.2 util-linux-2.37.4-1.amzn2023.0.7 tar-1.34-1.amzn2023.0.4 gzip-1.12-1.amzn2023.0.1 findutils-4.8.0-2.amzn2023.0.2 \
+    && dnf clean all \
+    && curl -fsSL https://download.docker.com/linux/static/stable/aarch64/docker-29.9.3.tgz -o /tmp/docker.tgz \
+    && echo '1b27fd739378ef938401e81ce5afb73b7ad7432d4f598814a9ff5f826bb464d2  /tmp/docker.tgz' | sha256sum -c - \
+    && tar -xzf /tmp/docker.tgz -C /usr/local/bin --strip-components=1 \
+    && rm /tmp/docker.tgz \
+    && mkdir -p /usr/local/lib/docker/cli-plugins \
+    && curl -fsSL https://github.com/docker/compose/releases/download/v5.7.0/docker-compose-linux-aarch64 -o /usr/local/lib/docker/cli-plugins/docker-compose \
+    && echo '15861535d14e26555736b49376c95e14bfd94285366c8446bfac7156a972e76f  /usr/local/lib/docker/cli-plugins/docker-compose' | sha256sum -c - \
+    && chmod 755 /usr/local/lib/docker/cli-plugins/docker-compose \
+    && groupadd docker \
+    && usermod -aG docker factory \
+    && docker --version \
+    && docker compose version
+COPY image/compose_experiment.py image/compose_probe.py /opt/factory/image/
+COPY image/compose/ /opt/factory/image/compose/
+ENV PYTHONPATH=/opt/factory DOCKER_HOST=unix:///var/run/docker.sock
+CMD ["python3.13", "-m", "image.compose_experiment"]

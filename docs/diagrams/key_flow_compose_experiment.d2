@@ -1,0 +1,23 @@
+title: "Disposable Compose feasibility experiment"
+direction: right
+operator: "Authorized operator"
+aws: "AWS snapshot resume /run"
+vm: "Experimental ARM64 MicroVM (ALL capabilities)" {
+  controller: "Root experiment controller :8080"
+  daemon: "Root Docker daemon (after resume)"
+  worker: "factory user\nPinned Codex workspace-write sandbox / exec"
+  stack: "Compose project" {
+    db: "Valkey\nNamed volume"
+    http: "Built HTTP dependency\nWorkspace bind mount"
+  }
+  controller -> daemon: starts
+  controller -> worker: launches
+  worker -> daemon: "Unix socket (root-equivalent access)"
+  daemon -> stack: manages
+  stack.http -> stack.db: "service-name DNS / PING"
+  worker -> stack.http: "loopback :18080"
+}
+operator -> aws: launches
+aws -> vm.controller: resumes
+operator -> vm.controller: "authenticated evidence polls"
+operator -> aws: "terminates / confirms"

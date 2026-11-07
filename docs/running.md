@@ -68,6 +68,13 @@ an approved deployment path, then configure GitHub's webhook with the same secre
 and the `WebhookUrl` stack output. Do not put secrets in source or shell history.
 See [operations](operations.md) before enabling ingress.
 
+### Disposable Docker Compose probe
+
+The [Compose experiment runbook](docker-compose-experiment.md) covers an isolated
+rootful Docker image, local checks, two bounded AWS MicroVM trials, retained
+resources, and recovery. It requires separate build/AWS/model authorization and
+performs no GitHub writes; it does not change the deployed worker.
+
 ### One direct test
 
 Ensure the queue is empty and no Job/VM is active; prevent webhook submissions

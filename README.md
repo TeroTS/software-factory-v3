@@ -52,6 +52,8 @@ handling; direct tests must not overlap queued work.
 
 - [AWS deployment and live-test plan](docs/plans/aws-deployment-happy-path.md):
   proposed deployment gates and one direct GitHub happy-path test.
+- [Docker Compose experiment](docs/docker-compose-experiment.md): isolated,
+  operator-authorized rootful feasibility probe; not a production worker feature.
 - [Architecture](docs/architecture.md): components, queueing, and runtime flows.
 - [Operations](docs/operations.md): configuration, trust, logs, and failure limits.
 - [Interface contracts](docs/contracts.md) and [OpenAPI](openapi.yaml): submission

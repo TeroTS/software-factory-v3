@@ -15,6 +15,8 @@ put ticket-specific implementation details in the relevant ticket or docs.
 - `src/tools/`: local logging, read-only image-pin checks, deployment, and live-run tools.
 - `src/tests/`: standard-library tests; sandbox, emulator, and live checks are explicit.
 - `image/`: ARM64 Dockerfile, runtime dependencies, managed Codex policy, and skills.
+  `image/compose/` and `image/compose_*.py` are experimental-only; before changing
+  or running their live runner, read `docs/docker-compose-experiment.md`.
 - `Makefile`: shared setup and verification commands.
 - `pyproject.toml`, `uv.lock`, `.python-version`: tooling configuration, pinned
   development dependencies, and local Python selection.
