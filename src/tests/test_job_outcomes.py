@@ -134,13 +134,16 @@ class JobOutcomeTests(test_worker.WorkerFixture, test_workflow.WorkflowFixture):
                     "PollWorker": poll,
                     "TerminateVM": terminate,
                     "GetTerminationState": confirm,
+                    "CompleteQueuedJob": [{}],
                 },
-                job=[self.job],
+                job={"jobs": [self.job], "queue": {"PK": "JOBS", "SK": scenario}},
             )
         success = scenario in (
             "success",
             "skill-collision",
             "publication-ambiguous-success",
+            "repair-pass-2",
+            "repair-pass-3",
         )
         expected_status = "ok" if success else "error"
         self.assertEqual(kind, "Succeed" if success else "Fail")
@@ -162,6 +165,11 @@ class JobOutcomeTests(test_worker.WorkerFixture, test_workflow.WorkflowFixture):
         ):
             self.assertEqual(names.count(state), 1)
         self.assertLess(names.index("TerminateVM"), names.index("GetTerminationState"))
+        self.assertEqual(names.count("CompleteQueuedJob"), int(success))
+        if success:
+            self.assertLess(
+                names.index("GetTerminationState"), names.index("CompleteQueuedJob")
+            )
         publication = json.loads(evidence.read_text())
         before_agent = scenario in ("setup-failure", "baseline-verification-failure")
         before_review = before_agent or scenario == "final-verification-failure"
@@ -169,14 +177,26 @@ class JobOutcomeTests(test_worker.WorkerFixture, test_workflow.WorkflowFixture):
         expected_stages = [] if before_agent else ["implement"]
         if not before_review:
             expected_stages += ["review"]
-            if not review_failure:
+            if scenario == "review-fail":
+                expected_stages += ["implement", "review", "implement", "review"]
+            elif scenario.startswith("repair-"):
+                expected_stages += ["implement"]
+                if scenario not in (
+                    "repair-verification-failure",
+                    "repair-process-error",
+                    "repair-unchanged",
+                ):
+                    expected_stages += ["review"]
+                    if scenario == "repair-pass-3":
+                        expected_stages += ["implement", "review"]
+                    if success or scenario.startswith("repair-publication-"):
+                        expected_stages += ["publish"]
+            elif not review_failure:
                 expected_stages += ["publish"]
         self.assertEqual(publication["stages"], expected_stages)
         self.assertEqual(publication["agent_calls"], len(expected_stages))
-        expected_prs = (
-            0
-            if before_review or review_failure or scenario == "publication-failure"
-            else 1
+        expected_prs = int(
+            "publish" in expected_stages and scenario != "publication-failure"
         )
         self.assertEqual(len(publication["prs"]), expected_prs)
         if review_failure:
@@ -191,16 +211,18 @@ class JobOutcomeTests(test_worker.WorkerFixture, test_workflow.WorkflowFixture):
                 "release",
             )
             self.assertIn("Verified repository script", logs.read_text())
+            rounds = (
+                3
+                if scenario == "repair-pass-3"
+                else 2
+                if scenario == "repair-pass-2"
+                else 1
+            )
             self.assertEqual(
                 publication["events"],
-                [
-                    "./scripts/setup",
-                    "./scripts/verify",
-                    "implement",
-                    "./scripts/verify",
-                    "review",
-                    "publish",
-                ],
+                ["./scripts/setup", "./scripts/verify"]
+                + ["implement", "./scripts/verify", "review"] * rounds
+                + ["./scripts/verify", "publish"],
             )
             self.assertEqual(publication["reviewed_head"], pr["headRefOid"])
             self.assertEqual(
@@ -242,9 +264,31 @@ class JobOutcomeTests(test_worker.WorkerFixture, test_workflow.WorkflowFixture):
             "untracked",
             "commit",
             "branch",
+            "stale",
         ):
             with self.subTest(scenario=scenario):
                 self.run_outcome("review-" + scenario)
+
+    def test_repaired_candidate_passes_second_or_third_review(self):
+        for scenario in ("repair-pass-2", "repair-pass-3"):
+            with self.subTest(scenario=scenario):
+                self.run_outcome(scenario)
+
+    def test_repair_failures_remain_terminal_and_keep_queue_blocked(self):
+        for scenario in (
+            "verification-failure",
+            "process-error",
+            "unchanged",
+            "review-stale",
+            "review-process-error",
+            "review-edit",
+            "post-review-verification-failure",
+            "post-review-verification-edit",
+            "publication-edit",
+            "publication-different-commit",
+        ):
+            with self.subTest(scenario=scenario):
+                self.run_outcome("repair-" + scenario)
 
     def test_changed_publication_commit_or_workspace_cannot_succeed(self):
         for scenario in ("different-commit", "edit"):

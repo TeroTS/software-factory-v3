@@ -48,7 +48,7 @@ class ImageRuntimeTests(unittest.TestCase):
     def test_factory_skill_sources_have_complete_local_references_and_metadata(self):
         root = Path(__file__).resolve().parents[2]
         bundle = root / "image/skills"
-        expected = {"implement", "code-review", "pr", "tdd", "codebase-design"}
+        expected = {"implement", "code-review", "pr", "tdd"}
         self.assertEqual({path.name for path in bundle.iterdir()}, expected)
         for name in expected:
             with self.subTest(skill=name):

@@ -1,6 +1,6 @@
 # Factory skill bundle
 
-The five skills in `image/skills/` are VM deployment assets, not repository-local
+The four skills in `image/skills/` are VM deployment assets, not repository-local
 agent skills. They do not participate in this repository's `.agents/skills/`
 discovery; development agents can use their globally installed skills instead.
 
@@ -19,10 +19,9 @@ Every skill includes `SKILL.md` and `agents/openai.yaml`.
 | Skill | Bundled references and dependencies |
 | --- | --- |
 | implement | Reads tdd; returns to the worker for independent review. |
-| code-review | Reads codebase-design when interface/seam vocabulary is needed; covers Standards and Spec in one read-only conversation. |
+| code-review | Covers Standards and Spec in one read-only conversation. |
 | pr | Includes `CREDITS.md`; upstream show-me URLs are attribution, not executable dependencies. |
-| tdd | Includes `tests.md` and `mocking.md`; links to codebase-design and read-only review guidance. |
-| codebase-design | Includes `DEEPENING.md` and `DESIGN-IT-TWICE.md`, which link back to its vocabulary and to each other. |
+| tdd | Includes `tests.md` and `mocking.md`; links to read-only review guidance. |
 
 Tests resolve local Markdown links within this bundle. New skill/tool references
 need dependency review; do not install dependencies or silently omit supporting
@@ -38,7 +37,6 @@ files. Source staging and Docker context allow only the required skill files.
 | Structured review output | Fresh review | Offline preflight checks pinned CLI output-schema/last-message flags. Job lifecycle tests simulate structured results and reject invalid evidence or candidate mutation. Real provider behavior still requires separately authorized inference. |
 | GitHub CLI, repository-scoped token, network | Publication and merge | Existing installed CLI and credential scope; live GitHub checks and merge policy require separately authorized verification. |
 | AWS credential discovery and model access | Agent execution | Existing worker/image configuration; no model/provider change or live inference is implied by packaging. |
-| Parallel fresh-context sub-agents | Optional Design It Twice only | Outside ordinary factory Jobs; verify actual CLI/managed-policy/provider support before activation, or report blocked. |
 
 The ordinary path needs no tracker bootstrap, interactive approval wait, MCP
 server, browser, or diagram renderer. Missing essential requirements, required

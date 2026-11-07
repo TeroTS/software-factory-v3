@@ -14,19 +14,37 @@ def main():
     fixture = WorkerFixture()
     fixture.setUp(origin=origin, workspace=workspace)
     original_agent = fixture.agent
+    review_heads = []
 
     def agent(*args):
         result = original_agent(*args)
         cli, _prompt, repository, env, _secrets = args
         stage = fixture.stages[-1]
-        if stage == "implement" and scenario == "final-verification-failure":
-            (repository / "greeting.txt").write_text("")
+        if stage == "implement":
+            if review_heads:
+                fixture.assertIn(review_heads[-1], _prompt)
+                fixture.assertIn("Review data", _prompt)
+                fixture.assertIn(f"Required detail {len(review_heads)}", _prompt)
+                if len(review_heads) > 1:
+                    fixture.assertNotIn("Required detail 1", _prompt)
+                if scenario != "repair-unchanged":
+                    (repository / "greeting.txt").write_text("hello world\n")
+                    (repository / "untracked.txt").write_text(
+                        f"repaired detail {len(review_heads)}\n"
+                    )
+                if scenario == "repair-verification-failure":
+                    (repository / "greeting.txt").write_text("")
+                if scenario == "repair-process-error":
+                    raise subprocess.CalledProcessError(7, ["codex", "exec"])
+            if scenario == "final-verification-failure":
+                (repository / "greeting.txt").write_text("")
         if stage == "review":
+            review_heads.append(fixture.reviewed_head)
             output = Path(cli[cli.index("--output-last-message") + 1])
             finding = {
                 "axis": "Spec",
                 "location": "greeting.txt:1",
-                "problem": "Required greeting missing github_pat_synthetic_token",
+                "problem": f"Required detail {len(review_heads)} missing github_pat_synthetic_token",
                 "correction": "Implement the requested greeting",
             }
             reviews = {
@@ -50,8 +68,17 @@ def main():
                 "review-nonobject": [],
                 "review-nonlist": {"verdict": "PASS", "findings": None},
             }
+            repairs = scenario.startswith("repair-")
+            if repairs and (
+                len(review_heads) == 1
+                or (scenario == "repair-pass-3" and len(review_heads) == 2)
+            ):
+                reviews[scenario] = {"verdict": "FAIL", "findings": [finding]}
             if scenario in reviews:
-                output.write_text(json.dumps(reviews[scenario]))
+                review = reviews[scenario]
+                if isinstance(review, dict):
+                    review = {"candidateHead": fixture.reviewed_head, **review}
+                output.write_text(json.dumps(review))
             elif scenario == "review-missing":
                 output.unlink()
             elif scenario == "review-malformed":
@@ -72,12 +99,33 @@ def main():
                 )
             elif scenario == "review-branch":
                 fixture.external(["git", "switch", "-c", "reviewer"], repository, env)
+            elif scenario == "review-stale" or (
+                scenario == "repair-review-stale" and len(review_heads) == 2
+            ):
+                output.write_text(
+                    json.dumps(
+                        {
+                            "candidateHead": fixture.sha
+                            if len(review_heads) == 1
+                            else review_heads[0],
+                            "verdict": "PASS",
+                            "findings": [],
+                        }
+                    )
+                )
+            elif scenario == "repair-review-process-error" and len(review_heads) == 2:
+                raise subprocess.CalledProcessError(7, ["codex", "exec"])
+            elif scenario == "repair-review-edit" and len(review_heads) == 2:
+                (repository / "greeting.txt").write_text("review edit\n")
         if stage == "publish":
             if scenario in ("publication-ambiguous-success", "publication-failure"):
                 if scenario == "publication-failure":
                     fixture.prs = []
                 raise subprocess.CalledProcessError(1, ["gh", "pr", "create"])
-            if scenario == "publication-different-commit":
+            if scenario in (
+                "publication-different-commit",
+                "repair-publication-different-commit",
+            ):
                 fixture.external(
                     ["git", "commit", "--allow-empty", "-m", "replacement"],
                     repository,
@@ -87,13 +135,27 @@ def main():
                 fixture.prs[0]["headRefOid"] = fixture.external(
                     ["git", "rev-parse", "HEAD"], repository, env
                 ).strip()
-            if scenario == "publication-edit":
+            if scenario in ("publication-edit", "repair-publication-edit"):
                 (repository / "greeting.txt").write_text("publisher edit\n")
         return result
 
+    def external(args, cwd, env, secrets=None):
+        if (
+            args == ["./scripts/verify"]
+            and len(review_heads) == 3
+            and scenario == "review-fail"
+        ):
+            raise AssertionError("Exhausted reviews must not advance to verification")
+        if args == ["./scripts/verify"] and len(review_heads) == 2:
+            if scenario == "repair-post-review-verification-failure":
+                (cwd / "greeting.txt").write_text("")
+            elif scenario == "repair-post-review-verification-edit":
+                (cwd / "untracked.txt").write_text("verification mutation\n")
+        return fixture.external(args, cwd, env, secrets)
+
     try:
         with (
-            patch.object(fixture.task, "capture", side_effect=fixture.external),
+            patch.object(fixture.task, "capture", side_effect=external),
             patch.object(fixture.task, "run_agent", side_effect=agent),
         ):
             code = fixture.task.main()
