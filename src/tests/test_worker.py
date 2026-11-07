@@ -80,6 +80,9 @@ class WorkerFixture(unittest.TestCase):
         from src.worker import task
 
         self.task = task
+        docker = patch.object(task, "wait_for_docker")
+        docker.start()
+        self.addCleanup(docker.stop)
         config_patch = patch.object(
             task,
             "CODEX_CONFIG",

@@ -167,7 +167,7 @@ class Image(Stack):
             resources=[
                 lambda_.CfnMicrovmImage.ResourcesProperty(minimum_memory_in_mib=2048)
             ],
-            additional_os_capabilities=[],
+            additional_os_capabilities=["ALL"],
             egress_network_connectors=[CONNECTOR + "INTERNET_EGRESS"],
             logging=lambda_.CfnMicrovmImage.LoggingProperty(
                 cloud_watch=lambda_.CfnMicrovmImage.CloudWatchLoggingProperty(

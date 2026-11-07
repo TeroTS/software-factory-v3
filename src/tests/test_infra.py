@@ -319,7 +319,7 @@ class InfrastructureTests(unittest.TestCase):
         self.image_template.has_resource_properties(
             "AWS::Lambda::MicrovmImage",
             {
-                "AdditionalOsCapabilities": [],
+                "AdditionalOsCapabilities": ["ALL"],
                 "BaseImageVersion": "3",
                 "Resources": [{"MinimumMemoryInMiB": 2048}],
                 "CpuConfigurations": [{"Architecture": "ARM_64"}],

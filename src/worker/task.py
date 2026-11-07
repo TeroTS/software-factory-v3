@@ -25,7 +25,7 @@ from src.worker.review import (
     ReviewRejected,
     read_review_result,
 )
-from src.worker.server import parse_job
+from src.worker.server import parse_job, wait_for_docker
 
 CODEX_CONFIG = Path("/etc/codex/managed_config.toml")
 AWS_CONFIG = Config(
@@ -481,6 +481,7 @@ def review_and_repair_candidate(job, repository, branch, head, env, secrets):
 # Coordinate verification, bounded fresh review, publication and gated merge; fail closed before queue release.
 def execute(job):
     job = parse_job({"microvmId": "runtime", "runHookPayload": json.dumps(job)})
+    wait_for_docker()
     secrets = []
     env = prepare_environment(secrets)
     repository, branch = prepare_repository(job, env, secrets)
