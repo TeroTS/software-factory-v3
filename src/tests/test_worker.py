@@ -25,6 +25,7 @@ class PublicationTests(unittest.TestCase):
         pr = {
             "number": 2,
             "state": "OPEN",
+            "isCrossRepository": False,
             "mergedAt": None,
             "baseRefName": "release",
             "headRefName": "factory/task-test",
@@ -32,6 +33,8 @@ class PublicationTests(unittest.TestCase):
         }
         self.task.verify_pr([pr], "factory/task-test", "b" * 40, "release")
         for changes in (
+            {"isCrossRepository": True},
+            {"isCrossRepository": None},
             {"state": "CLOSED"},
             {"mergedAt": "now"},
             {"headRefName": "wrong"},
@@ -191,6 +194,14 @@ class WorkerFixture(unittest.TestCase):
         if args[:3] == ["gh", "pr", "list"]:
             self.assertNotIn("baseRefOid", args[args.index("--json") + 1].split(","))
             return json.dumps(self.prs)
+        if args[:3] == ["gh", "pr", "checks"]:
+            return "[]"
+        if args[:2] == ["gh", "api"]:
+            return json.dumps(
+                {"full_name": self.job["repository"], "allow_merge_commit": True}
+            )
+        if args == ["git", "remote", "get-url", "origin"]:
+            return self.clone_url + "\n"
         if args[:2] == ["codex", "--version"]:
             return "codex-cli 0.166.0"
         if args[:2] == ["git", "clone"]:
@@ -253,6 +264,25 @@ class WorkerFixture(unittest.TestCase):
                 json.dumps({"candidateHead": head, "verdict": "PASS", "findings": []})
             )
             return
+        if "Independent worker gate authorizes merge" in prompt:
+            self.stages.append("merge")
+            self.events.append("merge")
+            self.assertIn("/opt/factory/skills/pr/SKILL.md", prompt)
+            self.assertIn("--match-head-commit " + head, prompt)
+            self.assertIn("gh pr merge 2 --repo " + self.job["repository"], prompt)
+            self.assertIn("--merge", prompt)
+            command = prompt.split("Request exactly: ")[1].splitlines()[0]
+            self.assertNotIn("--admin", command)
+            self.assertNotIn("--auto", command)
+            self.assertEqual(head, self.reviewed_head)
+            branch = self.prs[0]["headRefName"]
+            self.git("merge", "--no-ff", branch, "-m", "Merge PR #2")
+            self.prs[0].update(
+                state="MERGED",
+                mergedAt="2026-01-01T00:00:00Z",
+                mergeCommit={"oid": self.git("rev-parse", "HEAD").strip()},
+            )
+            return
         self.stages.append("publish")
         self.events.append("publish")
         self.assertIn("/opt/factory/skills/pr/SKILL.md", prompt)
@@ -265,6 +295,7 @@ class WorkerFixture(unittest.TestCase):
             {
                 "number": 2,
                 "state": "OPEN",
+                "isCrossRepository": False,
                 "mergedAt": None,
                 "baseRefName": "release",
                 "headRefName": branch,
@@ -274,6 +305,38 @@ class WorkerFixture(unittest.TestCase):
 
 
 class WorkerTests(WorkerFixture):
+    # Completion proves a gated merge of the reviewed head into the real target repository.
+    def test_success_requires_independently_verified_merge(self):
+        with (
+            patch.object(self.task, "capture", side_effect=self.external),
+            patch.object(self.task, "run_agent", side_effect=self.agent),
+            contextlib.redirect_stdout(io.StringIO()) as logs,
+        ):
+            self.task.execute(self.job)
+        self.assertEqual(self.stages, ["implement", "review", "publish", "merge"])
+        self.assertEqual(self.prs[0]["state"], "MERGED")
+        parents = self.git("rev-list", "--parents", "-n", "1", "release").split()
+        self.assertEqual(len(parents), 3)
+        self.assertEqual(parents[2], self.reviewed_head)
+        self.assertIn("Independently confirm merged integration", logs.getvalue())
+
+    # JSON export exits zero even for failing checks; only required pass/skipped results permit merge.
+    def test_required_check_json_cannot_authorize_pending_or_failed_merge(self):
+        def external(args, cwd, env, secrets=None):
+            if args[:3] == ["gh", "pr", "checks"]:
+                return '[{"name":"test", "bucket":"pending"}]'
+            return self.external(args, cwd, env, secrets)
+
+        with (
+            patch.object(self.task, "capture", side_effect=external),
+            patch.object(self.task, "run_agent", side_effect=self.agent),
+            contextlib.redirect_stdout(io.StringIO()),
+            self.assertRaisesRegex(ValueError, "required checks"),
+        ):
+            self.task.execute(self.job)
+        self.assertEqual(self.stages, ["implement", "review", "publish"])
+        self.assertEqual(self.prs[0]["state"], "OPEN")
+
     # A validated rejection gets a new implementation process and fresh review of the repaired commit.
     def test_required_findings_are_repaired_before_fresh_review_and_publication(self):
         finding = {
@@ -326,7 +389,8 @@ class WorkerTests(WorkerFixture):
         ):
             self.task.execute(self.job)
         self.assertEqual(
-            self.stages, ["implement", "review", "implement", "review", "publish"]
+            self.stages,
+            ["implement", "review", "implement", "review", "publish", "merge"],
         )
         self.assertNotEqual(heads[0], heads[1])
         self.assertEqual(self.prs[0]["headRefOid"], heads[1])
@@ -343,6 +407,7 @@ class WorkerTests(WorkerFixture):
                 "review",
                 "./scripts/verify",
                 "publish",
+                "merge",
             ],
         )
         self.assertIn("2 of 3", prompts[0])
@@ -476,10 +541,11 @@ class WorkerTests(WorkerFixture):
                 "agent",
                 "./scripts/verify",
                 "agent",
+                "agent",
             ],
         )
-        self.assertEqual(self.stages, ["implement", "review", "publish"])
-        self.assertEqual(self.agent_calls, 3)
+        self.assertEqual(self.stages, ["implement", "review", "publish", "merge"])
+        self.assertEqual(self.agent_calls, 4)
         self.assertEqual(len(self.prs), 1)
         for stubber in self.stubbers.values():
             stubber.assert_no_pending_responses()
@@ -526,6 +592,7 @@ class WorkerTests(WorkerFixture):
             "review_candidate",
             "verify_review_unchanged",
             "publish_candidate",
+            "merge_candidate",
         )
         for failed in stages:
             calls = []
@@ -540,6 +607,7 @@ class WorkerTests(WorkerFixture):
                         "prepare_repository": (self.root, "branch"),
                         "invoke_agent": [],
                         "review_candidate": ("PASS", []),
+                        "publish_candidate": {"number": 2},
                     }.get(name)
 
                 return run
@@ -555,7 +623,11 @@ class WorkerTests(WorkerFixture):
                 logs = stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
                 self.assertEqual(self.task.main(), 1)
                 expected = list(stages[: stages.index(failed) + 1])
-                if failed in ("verify_review_unchanged", "publish_candidate"):
+                if failed in (
+                    "verify_review_unchanged",
+                    "publish_candidate",
+                    "merge_candidate",
+                ):
                     expected.insert(
                         expected.index("verify_review_unchanged"), "verify_candidate"
                     )
@@ -588,7 +660,7 @@ class WorkerTests(WorkerFixture):
             contextlib.redirect_stdout(io.StringIO()),
         ):
             self.task.execute(self.job)
-        self.assertEqual(self.stages, ["implement", "review", "publish"])
+        self.assertEqual(self.stages, ["implement", "review", "publish", "merge"])
 
     # Missing credentials fail through the SDK request, before checkout or agent work.
     def test_missing_sdk_credentials_stop_before_repository_or_agent(self):
@@ -701,7 +773,7 @@ class WorkerTests(WorkerFixture):
             contextlib.redirect_stdout(io.StringIO()) as logs,
         ):
             self.task.execute(self.job)
-        self.assertEqual(self.agent_calls, 3)
+        self.assertEqual(self.agent_calls, 4)
         self.assertIn("Verified repository script", logs.getvalue())
 
     # Reject a task whose final commit does not descend from the pinned baseline.

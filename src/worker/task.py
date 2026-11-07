@@ -1,4 +1,4 @@
-# Execute one controlled Job inside the VM; exit zero only after independent publication evidence.
+# Execute one controlled Job inside the VM; exit zero only after independently proven merged integration.
 import json
 import os
 import re
@@ -13,7 +13,12 @@ from pathlib import Path
 import boto3
 from botocore.config import Config
 
-from src.worker.prompts import implementation_prompt, publication_prompt, review_prompt
+from src.worker.prompts import (
+    implementation_prompt,
+    merge_prompt,
+    publication_prompt,
+    review_prompt,
+)
 from src.worker.review import (
     REVIEW_SCHEMA,
     ReviewError,
@@ -201,24 +206,28 @@ def invoke_agent(job, repository, branch, env, secrets, *, prompt=None, options=
     )
 
 
-# Check one open, unmerged PR against verified task branch/head and configured target, which may advance.
-def verify_pr(prs, branch, head, target):
+# Check exactly one PR against the task identity and phase; return its identity or reject inconsistent evidence.
+def verify_pr(prs, branch, head, target, *, merged=False, number=None):
     if len(prs) != 1:
         raise ValueError("Expected exactly one PR on task branch")
     pr = prs[0]
     expected = {
-        "state": "OPEN",
-        "mergedAt": None,
+        "state": "MERGED" if merged else "OPEN",
         "baseRefName": target,
         "headRefName": branch,
         "headRefOid": head,
+        "isCrossRepository": False,
     }
     if (
         not isinstance(pr.get("number"), int)
         or pr["number"] <= 0
+        or isinstance(pr["number"], bool)
+        or (number is not None and pr["number"] != number)
+        or (not pr.get("mergedAt") if merged else pr.get("mergedAt") is not None)
         or any(pr.get(key) != value for key, value in expected.items())
     ):
-        raise ValueError("PR does not match verified unmerged task publication")
+        raise ValueError("PR does not match verified task identity/phase")
+    return pr
 
 
 # Independently verify implementation before any review or publication; propagate script failures.
@@ -319,14 +328,14 @@ def publish_candidate(
             "Publication process failed; inspect existing Git/PR state without retry",
             flush=True,
         )
-    verify_completion(job, repository, branch, head, env)
+    return verify_completion(job, repository, branch, head, env)
 
 
 # Independently confirm publication of exactly the reviewed commit after final verification; reject changed evidence.
 def verify_completion(job, repository, branch, reviewed_head, env):
     print("Independently confirm reviewed publication", flush=True)
     verify_local_candidate(job, repository, branch, reviewed_head, env)
-    verify_remote_publication(job, repository, branch, reviewed_head, env)
+    return verify_remote_publication(job, repository, branch, reviewed_head, env)
 
 
 # Confirm a clean task branch at the reviewed SHA with a nonempty change descended from the pinned baseline.
@@ -351,12 +360,29 @@ def verify_local_candidate(job, repository, branch, reviewed_head, env):
         raise ValueError("Missing nonempty committed change")
 
 
-# Confirm the remote branch and exactly one open PR have the reviewed head and configured target.
-def verify_remote_publication(job, repository, branch, head, env):
+# Confirm origin and scoped repository access; return settings without trusting agent-selected repository identity.
+def verify_repository(job, repository, env):
+    remote = capture(["git", "remote", "get-url", "origin"], repository, env).strip()
+    if remote != "https://github.com/" + job["repository"] + ".git":
+        raise ValueError("Repository origin mismatch")
+    settings = json.loads(
+        capture(["gh", "api", "repos/" + job["repository"]], repository, env)
+    )
+    if settings.get("full_name", "").lower() != job["repository"].lower():
+        raise ValueError("Scoped repository identity mismatch")
+    return settings
+
+
+# Confirm the remote task head and exactly one phase-matching PR in the authorized repository.
+def verify_remote_publication(
+    job, repository, branch, head, env, *, merged=False, number=None
+):
+    verify_repository(job, repository, env)
     remote = capture(
         ["git", "ls-remote", "--heads", "origin", branch], repository, env
     ).split()
-    if remote != [head, "refs/heads/" + branch]:
+    # GitHub may delete the task ref after merge; the bound PR head and fetched parents still prove publication.
+    if remote != [head, "refs/heads/" + branch] and not (merged and not remote):
         raise ValueError("Published branch/head mismatch")
     prs = json.loads(
         capture(
@@ -371,13 +397,108 @@ def verify_remote_publication(job, repository, branch, head, env):
                 "--state",
                 "all",
                 "--json",
-                "number,state,mergedAt,baseRefName,headRefName,headRefOid",
+                "number,state,mergedAt,baseRefName,headRefName,headRefOid,mergeCommit,isCrossRepository",
             ],
             repository,
             env,
         )
     )
-    verify_pr(prs, branch, head, env["PR_TARGET_BRANCH"])
+    return verify_pr(
+        prs, branch, head, env["PR_TARGET_BRANCH"], merged=merged, number=number
+    )
+
+
+# Inspect required-only checks with the pinned CLI; its JSON mode exits zero even when checks fail.
+def verify_required_checks(job, repository, branch, number, env):
+    args = [
+        "gh",
+        "pr",
+        "checks",
+        str(number),
+        "--repo",
+        job["repository"],
+        "--required",
+        "--json",
+        "name,bucket",
+    ]
+    try:
+        checks = json.loads(capture(args, repository, env))
+    except subprocess.CalledProcessError as error:
+        # gh 2.103.3 reports an empty required set as exit 1, not JSON; all other errors fail closed.
+        empty = {
+            f"no checks reported on the '{branch}' branch",
+            f"no required checks reported on the '{branch}' branch",
+        }
+        if error.returncode == 1 and (error.stderr or "").strip() in empty:
+            return
+        raise
+    if not isinstance(checks, list) or any(
+        not isinstance(check, dict) or check.get("bucket") not in ("pass", "skipping")
+        for check in checks
+    ):
+        raise ValueError("GitHub required checks are not satisfied")
+
+
+# Authorize one fresh merge process after the worker gate; inspect lost responses without an unchecked retry.
+def merge_candidate(job, repository, branch, head, number, env, secrets):
+    verify_local_candidate(job, repository, branch, head, env)
+    verify_remote_publication(job, repository, branch, head, env, number=number)
+    if verify_repository(job, repository, env).get("allow_merge_commit") is not True:
+        raise ValueError("Repository prohibits merge commits")
+    verify_required_checks(job, repository, branch, number, env)
+    print(
+        "Independent worker gate authorizes merge of PR " + str(number) + " at " + head,
+        flush=True,
+    )
+    try:
+        invoke_agent(
+            job,
+            repository,
+            branch,
+            env,
+            secrets,
+            prompt=merge_prompt(job, branch, env["PR_TARGET_BRANCH"], head, number),
+        )
+    except (subprocess.CalledProcessError, OSError):
+        print(
+            "Merge process failed; inspect existing Git/PR state without retry",
+            flush=True,
+        )
+    verify_merged_integration(job, repository, branch, head, number, env)
+
+
+# Prove the exact PR merge has two parents, reviewed head second, and ancestry in the independently fetched target.
+def verify_merged_integration(job, repository, branch, head, number, env):
+    print("Independently confirm merged integration", flush=True)
+    verify_local_candidate(job, repository, branch, head, env)
+    pr = verify_remote_publication(
+        job, repository, branch, head, env, merged=True, number=number
+    )
+    merge = (pr.get("mergeCommit") or {}).get("oid")
+    if not isinstance(merge, str) or not re.fullmatch(r"[0-9a-f]{40}", merge):
+        raise ValueError("Missing merge commit identity")
+    capture(
+        [
+            "git",
+            "fetch",
+            "--no-tags",
+            "origin",
+            "refs/heads/" + env["PR_TARGET_BRANCH"],
+        ],
+        repository,
+        env,
+    )
+    target = capture(["git", "rev-parse", "FETCH_HEAD"], repository, env).strip()
+    capture(["git", "fetch", "--no-tags", "origin", merge], repository, env)
+    parents = capture(
+        ["git", "rev-list", "--parents", "-n", "1", merge], repository, env
+    ).split()
+    if len(parents) != 3 or parents[0] != merge or parents[2] != head:
+        raise ValueError(
+            "Merge commit does not integrate verified head as second parent"
+        )
+    capture(["git", "merge-base", "--is-ancestor", merge, target], repository, env)
+    verify_repository(job, repository, env)
 
 
 # Review/repair a committed candidate within three passes; return passing head/count/addressed findings or fail closed.
@@ -414,7 +535,7 @@ def review_and_repair_candidate(job, repository, branch, head, env, secrets):
         head = commit_candidate(repository, branch, env, secrets)
 
 
-# Validate and coordinate one Job's stages; complete only after independent review/publication evidence.
+# Coordinate verification, bounded fresh review, publication and gated merge; fail closed before queue release.
 def execute(job):
     job = parse_job({"microvmId": "runtime", "runHookPayload": json.dumps(job)})
     secrets = []
@@ -428,7 +549,7 @@ def execute(job):
     )
     verify_candidate(repository, env, secrets)
     verify_review_unchanged(repository, branch, head, env)
-    publish_candidate(
+    pr = publish_candidate(
         job,
         repository,
         branch,
@@ -438,10 +559,11 @@ def execute(job):
         review_count=review_count,
         addressed=addressed,
     )
+    merge_candidate(job, repository, branch, head, pr["number"], env, secrets)
     print(
-        "Verified repository script, nonempty commit, baseline ancestry and one agent-published unmerged PR; fresh review PASS for commit "
+        "Verified repository script, nonempty commit, baseline ancestry and independently verified merged PR; fresh review PASS for commit "
         + head
-        + "; merge not authorized",
+        + "; merged integration confirmed",
         flush=True,
     )
 

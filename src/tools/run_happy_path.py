@@ -1,4 +1,4 @@
-# Submit or observe one named Job; verify publication and service-confirmed cleanup without reruns.
+# Submit or observe one named Job; verify merged integration and service-confirmed cleanup without reruns.
 import json
 import os
 import re
@@ -121,7 +121,7 @@ def worker_logs(session, vm_id, version):
     )
 
 
-# Correlate logs to the task branch and independently check PR/remote ancestry; display only the review diff.
+# Correlate review/gate logs with merged PR identity and target ancestry; display only the reviewed PR diff.
 def inspect_publication(session, vm_id, version, job, target):
     logs = worker_logs(session, vm_id, version)
     branches = set(
@@ -129,14 +129,22 @@ def inspect_publication(session, vm_id, version, job, target):
     )
     verification = logs.split("Independently verify repository candidate")
     reviewed = re.findall(r"Review verdict PASS for commit ([0-9a-f]{40})", logs)
+    gates = re.findall(
+        r"Independent worker gate authorizes merge of PR ([1-9][0-9]*) at ([0-9a-f]{40})",
+        logs,
+    )
     if (
         len(branches) != 1
-        or len(verification) != 2
+        or len(verification) < 3
         or len(reviewed) != 1
         or logs.count("Agent process actual exit code 0") < 2
         or "Command completed: ./scripts/verify; actual exit code 0"
         not in verification[-1].split("Fresh review of commit")[0]
         or "Independently confirm reviewed publication" not in logs
+        or "Independently confirm merged integration" not in logs
+        or "; merged integration confirmed" not in logs
+        or len(gates) != 1
+        or gates[0][1] != reviewed[0]
     ):
         raise live.OperatorError(
             "Missing stage verification, passing review, or unique task-branch evidence"
@@ -155,15 +163,12 @@ def inspect_publication(session, vm_id, version, job, target):
             "--state",
             "all",
             "--json",
-            "number,state,mergedAt,baseRefName,headRefName,headRefOid",
+            "number,state,mergedAt,baseRefName,headRefName,headRefOid,mergeCommit,isCrossRepository",
         )
     )
-    remote = json.loads(
-        live.output("gh", "api", "repos/" + repository + "/git/ref/heads/" + branch)
-    )["object"]["sha"]
-    if reviewed != [remote]:
-        raise live.OperatorError("Published head does not match the reviewed commit")
-    verify_pr(prs, branch, remote, target)
+    # The source ref may be automatically deleted after merge; PR head and merge parents retain its identity.
+    remote = reviewed[0]
+    pr = verify_pr(prs, branch, remote, target, merged=True, number=int(gates[0][0]))
     comparison = json.loads(
         live.output(
             "gh",
@@ -179,7 +184,29 @@ def inspect_publication(session, vm_id, version, job, target):
         raise live.OperatorError(
             "Published change is empty or not descended from the pinned baseline"
         )
-    number = str(prs[0]["number"])
+    merge = (pr.get("mergeCommit") or {}).get("oid")
+    if not isinstance(merge, str) or not re.fullmatch(r"[0-9a-f]{40}", merge):
+        raise live.OperatorError("Missing merge commit identity")
+    commit = json.loads(
+        live.output("gh", "api", "repos/" + repository + "/git/commits/" + merge)
+    )
+    if len(commit.get("parents", [])) != 2 or commit["parents"][1]["sha"] != remote:
+        raise live.OperatorError(
+            "Merge commit does not integrate the reviewed head as second parent"
+        )
+    current_target = json.loads(
+        live.output("gh", "api", "repos/" + repository + "/git/ref/heads/" + target)
+    )["object"]["sha"]
+    integration = json.loads(
+        live.output(
+            "gh",
+            "api",
+            "repos/" + repository + "/compare/" + merge + "..." + current_target,
+        )
+    )
+    if integration["merge_base_commit"]["sha"] != merge:
+        raise live.OperatorError("Merge commit is not an ancestor of current target")
+    number = str(pr["number"])
     print(redact(live.output("gh", "pr", "diff", number, "--repo", repository), []))
     return "https://github.com/" + repository + "/pull/" + number
 
@@ -249,7 +276,11 @@ def execute(session, name, job_file):
         live.confirm(
             "Review "
             + str(job_file)
-            + ". Start exactly one billable Job (model submission and agent branch/PR publication; no merge)?"
+            + ". Authorize exactly one billable Job (model submission, reviewed PR publication, and merge commit into "
+            + job["repository"]
+            + ":"
+            + configuration["PR_TARGET_BRANCH"]
+            + ")?"
         )
         live.idle(session)
         live.aws(
@@ -317,14 +348,14 @@ def execute(session, name, job_file):
         + version
         + "; "
         + str(polls)
-        + " authenticated polls; fresh review PASS; VM TERMINATED. PR remains unmerged; merge is not authorized by this Job."
+        + " authenticated polls; fresh review PASS; merged integration confirmed; VM TERMINATED."
     )
 
 
 # Require operator-provided name/input and expose observation only on subsequent identical invocations.
 def main(argv=None):
     parser = live.parser(
-        "Run or resume exactly one named happy-path Job; never deploy or merge"
+        "Run or resume exactly one named happy-path Job that merges into the configured target; never deploy"
     )
     parser.add_argument("--name", required=True)
     parser.add_argument("--job-file", required=True, type=Path)

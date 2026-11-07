@@ -9,8 +9,10 @@ root-owned under `/opt/factory/skills/`, with factory-user native discovery thro
 `/home/factory/.agents/skills/`. Canonical files are readable but not writable by
 `factory`. Discovery is not authorization: worker stages explicitly select canonical
 skill paths and enforce independent verification and review-before-publication.
-The current slice completes with an open, unmerged PR; repair and automatic merge
-remain unimplemented.
+The worker preserves a bounded three-pass review/repair budget, then publishes the
+reviewed commit. Only an independent worker gate permits a fresh exact-head merge
+invocation using the canonical PR skill. Success requires independently proven
+merge-commit integration into the configured target and confirmed VM termination.
 
 ## Reference inventory
 

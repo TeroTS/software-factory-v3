@@ -6,14 +6,15 @@ SKILLS = Path("/opt/factory/skills")
 
 
 # Supply task/repository context and canonical instructions, never another stage's history.
-def prompt_for(job, branch, target, skill):
+def prompt_for(job, branch, target, skill, *, merge_authorized=False):
     return f"""Work only in {job["repository"]} at pinned baseline {job["baseSha"]} on branch {branch}, targeting {target}.
 Agent task: {job["task"]}
 Read and follow the canonical factory skill at {SKILLS / skill / "SKILL.md"} and its referenced material.
 Select this absolute path even if repository skills have the same name; read applicable repository instructions/context too.
 Your FIRST shell command must be exactly: printf factory-shell-ok
 Stop on failure of this initial sandbox check, sandbox enforcement, model authentication or inference.
-Never change provider/model, remove sandbox enforcement, display credentials, change AWS configuration, or merge.
+Never change provider/model, remove sandbox enforcement, display credentials, or change AWS configuration.
+{"Merge only as explicitly authorized below." if merge_authorized else "Never merge."}
 Return on unrecoverable failure; prose or process exit alone is not completion evidence.
 """
 
@@ -46,6 +47,22 @@ def review_prompt(job, branch, target, head):
 Review the complete git diff {job["baseSha"]} {head}, covering both Standards and Spec.
 Remain read-only even if managed policy allows writes; do not run mutating verification.
 Return candidateHead exactly {head}, verdict and required findings through the supplied output schema and dedicated last-message file.
+"""
+    )
+
+
+# Authorize a fresh exact-head merge request only after independent publication checks, never source edits.
+def merge_prompt(job, branch, target, head, number):
+    return (
+        prompt_for(job, branch, target, "pr", merge_authorized=True)
+        + f"""Independent worker gate authorizes merge of PR {number} only, reviewed and independently verified head {head}.
+Do not edit, commit, push, publish another PR, squash, rebase, force-push, push the target, or bypass branch protection.
+Inspect this existing PR and required GitHub checks first; pending/failing required checks or conflicts must stop the Job.
+Repositories with no required checks are eligible; do not add a required-check policy or human-review gate.
+Request exactly: gh pr merge {number} --repo {job["repository"]} --merge --match-head-commit {head}
+Never use --admin, --auto, --squash, --rebase, or conflict repair. If merge commits are prohibited, stop.
+Inspect existing branch/PR state after any lost response; never blindly retry. Return without further action on uncertainty.
+An auto-merge request, prose, or exit code alone is not success; the worker must prove actual integration into {target}.
 """
     )
 
