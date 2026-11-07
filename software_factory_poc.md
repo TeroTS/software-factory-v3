@@ -3,7 +3,7 @@
 **Historical task brief, not the current implementation specification.** The
 implemented workflow now includes signed issue ingestion, a DynamoDB Job queue,
 fresh review, and gated automatic merge. See [current architecture](docs/architecture.md)
-and the [current workflow summary](docs/plans/human-readable/aws-lambda-microvm-software-factory-poc.md).
+and the [current workflow summary](docs/plans/aws-lambda-microvm-software-factory-poc.md).
 The original planning request below is preserved for context.
 
 ## Objective

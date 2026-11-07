@@ -60,5 +60,5 @@ AI review is heuristic and GitHub is trusted as merge authority. Local tests and
 Floci simulations do not prove live model behavior, GitHub policy enforcement,
 or deployed concurrency safety.
 
-See [current architecture](../../architecture.md), [running](../../running.md),
-[operations](../../operations.md), and [contracts](../../contracts.md).
+See [current architecture](../architecture.md), [running](../running.md),
+[operations](../operations.md), and [contracts](../contracts.md).

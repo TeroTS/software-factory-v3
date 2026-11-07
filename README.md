@@ -5,6 +5,10 @@ into a tested, reviewed, merged PR inside an AWS Lambda MicroVM, then confirms
 VM termination. Queued Jobs run under operator-controlled single-Job discipline;
 this is not a production concurrency guarantee.
 
+## Tags
+-  ver-3.0.0: No review and merge.
+-  ver-4.0.0: With automatic review and merge, no docker compose.
+
 ## Quick start
 
 Prerequisites: Python 3.14, `uv`, Make, and Node.js/npm for CDK. jsii recommends
