@@ -28,8 +28,8 @@ def response(status, message):
     }
 
 
-# Read deployment settings and return validated configuration, or None when required values or local endpoints are invalid.
-def _load_config():
+# Validate deployment-owned queue/GitHub settings and, for webhook receipt, the signing secret; return config or None without I/O.
+def _load_config(webhook=True):
     config = {
         "secret": os.environ.get("WEBHOOK_SECRET", ""),
         "repository": os.environ.get("AUTHORIZED_REPOSITORY", ""),
@@ -40,7 +40,7 @@ def _load_config():
         "github_local": os.environ.get("LOCAL_GITHUB_ENDPOINT"),
     }
     if (
-        not config["secret"]
+        (webhook and not config["secret"])
         or not re.fullmatch(r"[A-Za-z0-9-]+/[A-Za-z0-9_.-]+", config["repository"])
         or config["repository"].split("/")[-1] in (".", "..")
         or not config["target"].strip()

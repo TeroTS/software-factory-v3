@@ -3,6 +3,7 @@ import hmac
 import io
 import json
 import os
+import tempfile
 import time
 import unittest
 import urllib.error
@@ -83,10 +84,14 @@ class FlociTests(unittest.TestCase):
         self.addCleanup(
             secrets.delete_secret, SecretId=token, ForceDeleteWithoutRecovery=True
         )
-        with io.BytesIO() as data:
+        self.token_arn = token
+        from src.infra.ingress import stage_source
+
+        with io.BytesIO() as data, tempfile.TemporaryDirectory() as directory:
+            source = Path(stage_source(directory))
             with zipfile.ZipFile(data, "w") as archive:
-                for path in (ROOT / "receiver").glob("*.py"):
-                    archive.write(path, path.name)
+                for path in source.rglob("*.py"):
+                    archive.write(path, path.relative_to(source))
             code = data.getvalue()
         self.urls = {}
         for target in ("release", "missing", "unpaired-local"):
@@ -95,7 +100,7 @@ class FlociTests(unittest.TestCase):
                 FunctionName=name,
                 Runtime="python3.13",
                 Role=role,
-                Handler="handler.handle",
+                Handler="src.receiver.handler.handle",
                 Code={"ZipFile": code},
                 Timeout=30,
                 Environment={
@@ -220,10 +225,13 @@ class FlociTests(unittest.TestCase):
         self.log_group = "/aws/lambda/" + name
         self.logs.create_log_group(logGroupName=self.log_group)
         self.addCleanup(self.logs.delete_log_group, logGroupName=self.log_group)
-        with io.BytesIO() as data:
+        from src.infra.ingress import stage_source
+
+        with io.BytesIO() as data, tempfile.TemporaryDirectory() as directory:
+            source = Path(stage_source(directory))
             with zipfile.ZipFile(data, "w") as archive:
-                for path in (ROOT / "dispatcher").glob("*.py"):
-                    archive.write(path, path.name)
+                for path in source.rglob("*.py"):
+                    archive.write(path, path.relative_to(source))
                 archive.write(ROOT / "tests" / "dispatch_observer.py", "observer.py")
             code = data.getvalue()
         self.lambda_.create_function(
@@ -237,6 +245,11 @@ class FlociTests(unittest.TestCase):
                 "Variables": {
                     "JOB_TABLE_NAME": self.name,
                     "STATE_MACHINE_ARN": self.machine_arn,
+                    "AUTHORIZED_REPOSITORY": self.job["repository"],
+                    "PR_TARGET_BRANCH": "release",
+                    "GITHUB_SECRET_ARN": self.token_arn,
+                    "LOCAL_AWS_ENDPOINT": INTERNAL,
+                    "LOCAL_GITHUB_ENDPOINT": "http://github:8080",
                     "AWS_ENDPOINT_URL": INTERNAL,
                     "AWS_ACCESS_KEY_ID": "test",
                     "AWS_SECRET_ACCESS_KEY": "test",
@@ -393,6 +406,33 @@ class FlociTests(unittest.TestCase):
         )
         self.assertNotIn("CompleteQueuedJob", [name for name, _ in calls])
         self.assertEqual(self.jobs(), before)
+
+    def test_baseline_resolution_failure_blocks_later_signed_jobs(self):
+        self.assertEqual(self.post(), 202)
+        before = self.jobs()[0]
+        secrets = self.client("secretsmanager")
+        secrets.put_secret_value(SecretId=self.token_arn, SecretString="invalid-token")
+        self.start_handoff()
+        self.wait_for(lambda: self.jobs()[0]["status"]["S"] == "IN_PROGRESS")
+        self.wait_for(
+            lambda: any(
+                "Queued Job baseline preparation failed" in event["message"]
+                for event in self.logs.filter_log_events(logGroupName=self.log_group)[
+                    "events"
+                ]
+            )
+        )
+        self.assertEqual(self.executions(), [])
+        self.assertEqual(self.jobs()[0]["job"], before["job"])
+        secrets.put_secret_value(
+            SecretId=self.token_arn, SecretString="local-github-token"
+        )
+        self.assertEqual(self.post(), 202)
+        self.wait_for(lambda: len(self.notifications()) >= 1)
+        self.assertEqual(self.executions(), [])
+        self.assertEqual(
+            [item["status"]["S"] for item in self.jobs()], ["IN_PROGRESS", "PENDING"]
+        )
 
     def test_failed_or_unconfirmed_cleanup_blocks_later_signed_jobs(self):
         from src.tests.test_workflow import TaskError, simulate

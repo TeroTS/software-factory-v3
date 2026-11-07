@@ -1,4 +1,4 @@
-# Submit or observe one named Job; confirm GitHub merged PR state and service-confirmed cleanup without reruns.
+# Submit or observe one named direct test at its explicit pinned SHA (no queued baseline refresh); confirm merged PR state and service-confirmed cleanup.
 import json
 import os
 import re
@@ -189,7 +189,7 @@ def inspect_publication(session, vm_id, version, job, target):
     return "https://github.com/" + repository + "/pull/" + number
 
 
-# Submit/observe one singleton-array Job using a fixed identity; invalid envelopes and uncertain acknowledgements never trigger retries.
+# Submit/observe one direct singleton-array Job at its supplied SHA using a fixed identity; invalid envelopes and uncertain acknowledgements never trigger retries.
 def execute(session, name, job_file):
     payload = job_file.read_text()
     if len(payload.encode("utf-8")) > 16384:
@@ -330,10 +330,10 @@ def execute(session, name, job_file):
     )
 
 
-# Require operator-provided name/input and expose observation only on subsequent identical invocations.
+# Require the direct test's operator-provided name and pinned input; expose observation only on subsequent identical invocations.
 def main(argv=None):
     parser = live.parser(
-        "Run or resume exactly one named happy-path Job that merges into the configured target; never deploy"
+        "Run or resume one named direct test at its supplied pinned SHA (no queued baseline refresh), merging into the configured target; never deploy"
     )
     parser.add_argument("--name", required=True)
     parser.add_argument("--job-file", required=True, type=Path)
