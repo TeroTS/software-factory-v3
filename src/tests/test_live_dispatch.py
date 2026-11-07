@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import tempfile
 import time
 import unittest
 import uuid
@@ -146,10 +147,12 @@ class LiveDispatchTests(unittest.TestCase):
         )
         with io.BytesIO() as data:
             with zipfile.ZipFile(data, "w") as archive:
-                for path in (Path(__file__).resolve().parents[1] / "dispatcher").glob(
-                    "*.py"
-                ):
-                    archive.write(path, path.name)
+                from src.infra.ingress import stage_source
+
+                with tempfile.TemporaryDirectory() as directory:
+                    source = Path(stage_source(directory))
+                    for path in source.rglob("*.py"):
+                        archive.write(path, path.relative_to(source))
                 archive.write(
                     Path(__file__).with_name("dispatch_observer.py"), "observer.py"
                 )
@@ -167,6 +170,10 @@ class LiveDispatchTests(unittest.TestCase):
                 "Variables": {
                     "JOB_TABLE_NAME": self.name,
                     "STATE_MACHINE_ARN": self.machine,
+                    "AUTHORIZED_REPOSITORY": "example/fixture",
+                    "PR_TARGET_BRANCH": "release",
+                    "GITHUB_SECRET_ARN": "isolated-lookup-substitute",
+                    "DISPATCH_TEST_TARGET_SHA": "c" * 40,
                 }
             },
         )
@@ -242,6 +249,8 @@ class LiveDispatchTests(unittest.TestCase):
                 "job": {"M": {name: {"S": value} for name, value in job.items()}},
             },
         )
+        pinned = dict(job)
+        job["baseSha"] = "c" * 40
         executions = self.wait_for(
             lambda: self.aws(
                 "stepfunctions", "list_executions", stateMachineArn=self.machine
@@ -349,11 +358,11 @@ class LiveDispatchTests(unittest.TestCase):
             "stepfunctions",
             "start_execution",
             stateMachineArn=self.machine,
-            input=json.dumps([job]),
+            input=json.dumps([pinned]),
         )["executionArn"]
         execution = self.wait_for(lambda: self.finished(manual))
         self.assertEqual(execution["status"], "SUCCEEDED")
-        self.assertEqual(json.loads(execution["output"]), {"job": job})
+        self.assertEqual(json.loads(execution["output"]), {"job": pinned})
         self.assertEqual(
             [
                 (record["eventName"], record["status"])

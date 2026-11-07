@@ -34,19 +34,29 @@ This acknowledges execution startup, **not task success**. Retry an uncertain
 `StartExecution` with the same name and input, not a new job. AWS owns failure
 responses; no custom submission-error body is defined here.
 
-Direct starts are independent Step Functions tests: they have no queue reference
-and perform no terminal queue writes. The operator starts them only when the
-queue is empty and no Job is active, and submits no webhook Jobs until the direct
-execution's MicroVM termination is confirmed.
+Direct starts are independent Step Functions tests: they retain the explicitly
+supplied pinned `baseSha`, have no queue reference, and perform no terminal queue
+writes. Unlike queued Jobs, their baseline is not refreshed. The operator starts
+them only when the queue is empty and no Job is active, and submits no webhook
+Jobs until the direct execution's MicroVM termination is confirmed.
 
 ## Dispatcher → Step Functions: start a queued Job
 
 The Dispatcher calls the same AWS `StartExecution` operation with
 `input = JSON.stringify({jobs: [Job], queue: {PK: "JOBS", SK: enqueueTimestamp}})`.
-The workflow keeps `queue` separately from the unmodified worker Job payload.
-After successful execution and confirmed MicroVM termination, it updates that
-same composite key to `COMPLETED` before returning its existing success result.
-Direct testing continues to use only `[Job]`.
+Before startup, the Dispatcher unconditionally claims the oldest returned pending
+Job as `IN_PROGRESS`, resolves only the deployment-configured target in the
+authorized repository using the configured repository-scoped GitHub secret, and
+persists that exact SHA in the claimed item's existing `job.baseSha`. It submits
+the same SHA without changing the Job payload shape or rewriting other pending
+Jobs. Resolution or persistence failure starts no workflow; an uncertain start
+also retains the active blocker without retry or redispatch.
+
+The workflow keeps `queue` separately from the worker Job payload. Only
+independently verified merged completion and confirmed MicroVM termination permit
+that same composite key to become `COMPLETED`. The next selected Job resolves its
+execution baseline after this completion, including the preceding merge in the
+latest configured target. Direct testing continues to use only `[Job]`.
 
 ## Receiver → DynamoDB: accept a queued Job
 
@@ -54,7 +64,9 @@ A webhook `202` means DynamoDB accepted a conditional insert, not workflow
 startup or completion. The item has string `PK = JOBS`, timestamp-only string
 `SK` in `YYYY-MM-DDTHH:mm:ss.ffffffZ` UTC format, `status = PENDING`, and nested
 `job` with the existing Job fields. A timestamp collision rejects the new Job
-without replacing the existing one; there is no collision retry.
+without replacing the existing one; there is no collision retry. The stored
+`job.baseSha` is a receipt-time baseline, not the final queued execution baseline;
+it is refreshed only when that Job is claimed.
 
 `NEW_IMAGE` Streams notify the Dispatcher for `INSERT/PENDING` and
 `MODIFY/COMPLETED|FAILED`, using only the new-image status. Each invocation makes
@@ -62,11 +74,15 @@ one decision from current table contents: strongly consistent, ascending,
 one-page base-table queries check active Jobs, then select the oldest returned
 pending Job. No evaluated-item limit of one or pagination is used.
 
-This is a happy-path demonstration, not strict serialization: concurrent
-invocations can race, and one-page reads can miss Jobs beyond 1 MB. Startup
-failure, workflow failure, timeout, manual stop, or unconfirmed cleanup can leave
-a Job `IN_PROGRESS` and block later work. Failed-Job terminal persistence and
-continuation are not yet implemented; recovery is outside this demonstration.
+The operator must confirm single-dispatcher execution, a demonstration queue
+fitting the first DynamoDB query page (1 MB), and non-overlapping direct tests.
+These are operating assumptions, not deployed concurrency guarantees: claims
+remain non-atomic and one-page reads can miss Jobs beyond that page.
+Implementation, verification, exhausted review, publication, merge, baseline
+preparation, startup, workflow, timeout, manual-stop, and cleanup failures retain
+`IN_PROGRESS`. New enqueues, duplicate delivery, and unrelated notifications
+cannot bypass that blocker under these assumptions. No failed-Job release,
+automatic retry, reset, skip, or recovery is introduced.
 
 Deployment removes the old SQS queues and Pipe. Drain accepted work before
 applying the stack update; this change does not migrate existing queue messages.

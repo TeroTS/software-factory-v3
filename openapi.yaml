@@ -285,7 +285,7 @@ components:
         baseSha:
           type: string
           minLength: 1
-          description: Full pinned baseline commit SHA; checked during checkout.
+          description: Full baseline commit SHA checked during checkout. Webhook receipt stores the receipt-time target SHA; queued dispatch refreshes and persists this same field to the latest deployment-configured target SHA after claiming the Job and before workflow startup. Resolution or persistence failure blocks without fallback. Direct tests retain their explicitly supplied pinned SHA.
         task:
           type: string
           minLength: 1

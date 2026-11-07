@@ -8,7 +8,7 @@ import threading
 from pathlib import Path
 from unittest.mock import patch
 
-from src.tests import test_worker, test_workflow
+from src.tests import test_dispatcher, test_worker, test_workflow
 from src.worker.server import HOOK, Runtime, make_server
 
 
@@ -41,6 +41,49 @@ class JobOutcomeTests(test_worker.WorkerFixture, test_workflow.WorkflowFixture):
             self.git("commit", "-m", "same-name skills")
             self.sha = self.git("rev-parse", "HEAD").strip()
             self.job["baseSha"] = self.sha
+        dispatcher = test_dispatcher.DispatcherTests()
+        dispatcher.setUp()
+        self.addCleanup(dispatcher.doCleanups)
+        os.environ["AUTHORIZED_REPOSITORY"] = self.job["repository"]
+        os.environ["PR_TARGET_BRANCH"] = self.env["PR_TARGET_BRANCH"]
+        dispatcher.job = dict(self.job)
+        items = [dispatcher.item(index) for index in range(2)]
+        starts = []
+
+        def query(**request):
+            wanted = request["ExpressionAttributeValues"][":status"]
+            return {
+                "Items": [
+                    json.loads(json.dumps(item))
+                    for item in items
+                    if item["status"] == wanted
+                ]
+            }
+
+        def update(**request):
+            item = next(item for item in items if item["SK"] == request["Key"]["SK"])
+            values = request["ExpressionAttributeValues"]
+            if ":sha" in values:
+                item["job"]["M"]["baseSha"] = values[":sha"]
+            else:
+                item["status"] = values[":status"]
+            return {}
+
+        dispatcher.table.query.side_effect = query
+        dispatcher.table.update_item.side_effect = update
+        dispatcher.result.read.side_effect = lambda: json.dumps(
+            {
+                "sha": self.git("rev-parse", "refs/heads/release").strip(),
+            }
+        ).encode()
+        dispatcher.machine.start_execution.side_effect = lambda **request: (
+            starts.append(json.loads(request["input"]))
+        )
+        dispatcher.invoke([{}])
+        self.assertEqual(starts[0]["jobs"], [self.job])
+        self.assertEqual(items[0]["status"], {"S": "IN_PROGRESS"})
+        self.assertEqual(items[1]["status"], {"S": "PENDING"})
+
         workspace = self.root / scenario
         runtime = Runtime(workspace)
         server = make_server(runtime, ("127.0.0.1", 0))
@@ -140,9 +183,9 @@ class JobOutcomeTests(test_worker.WorkerFixture, test_workflow.WorkflowFixture):
                     "PollWorker": poll,
                     "TerminateVM": terminate,
                     "GetTerminationState": confirm,
-                    "CompleteQueuedJob": [{}],
+                    "CompleteQueuedJob": lambda request: update(**request),
                 },
-                job={"jobs": [self.job], "queue": {"PK": "JOBS", "SK": scenario}},
+                job=starts[0],
             )
         success = scenario in (
             "success",
@@ -189,6 +232,32 @@ class JobOutcomeTests(test_worker.WorkerFixture, test_workflow.WorkflowFixture):
             self.assertLess(
                 names.index("GetTerminationState"), names.index("CompleteQueuedJob")
             )
+        self.assertEqual(items[1]["job"]["M"]["baseSha"], {"S": self.job["baseSha"]})
+        self.assertEqual(
+            items[0]["status"], {"S": "COMPLETED" if success else "IN_PROGRESS"}
+        )
+        dispatcher.invoke([{"completion": True}])
+        self.assertEqual(len(starts), 2 if success else 1)
+        if success:
+            latest = self.git("rev-parse", "refs/heads/release").strip()
+            self.assertEqual(items[1]["job"]["M"]["baseSha"], {"S": latest})
+            self.assertEqual(starts[1]["jobs"][0]["baseSha"], latest)
+            if scenario == "success":
+                self.assertNotEqual(latest, self.job["baseSha"])
+                self.assertEqual(
+                    self.git("show", "release:greeting.txt").strip(), "hello world"
+                )
+        items.append(dispatcher.item(2))
+        for records in (
+            [{"enqueue": True}],
+            [{"duplicate": True}] * 2,
+            [{"unrelated": True}],
+        ):
+            dispatcher.invoke(records)
+        self.assertEqual(len(starts), 2 if success else 1)
+        self.assertEqual(items[2]["status"], {"S": "PENDING"})
+        self.assertEqual(items[2]["job"]["M"]["baseSha"], {"S": self.job["baseSha"]})
+
         publication = json.loads(evidence.read_text())
         before_agent = scenario in ("setup-failure", "baseline-verification-failure")
         before_review = before_agent or scenario == "final-verification-failure"

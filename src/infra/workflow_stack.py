@@ -144,6 +144,6 @@ class Workflow(Stack):
         CfnOutput(self, "ExecutionRoleArn", value=role.role_arn)
         CfnOutput(self, "ConnectionArn", value=connection.attr_arn)
         webhook_url = create_receiver(self, image, jobs)
-        create_dispatcher(self, jobs, machine)
+        create_dispatcher(self, image, jobs, machine)
         CfnOutput(self, "WebhookUrl", value=webhook_url)
         CfnOutput(self, "JobTableName", value=jobs.table_name)

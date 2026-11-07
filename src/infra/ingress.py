@@ -1,4 +1,5 @@
 # Provision webhook ingestion and stream dispatch in the supplied workflow stack, preserving construct paths and scoped permissions.
+import shutil
 from pathlib import Path
 
 from aws_cdk import CfnParameter, Duration, RemovalPolicy
@@ -7,6 +8,20 @@ from aws_cdk import aws_lambda as lambda_
 from aws_cdk import aws_logs as logs
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+# Stage only the two ingress packages and their shared resolver for both Lambda assets; rebuild from repository sources without credentials.
+def stage_source(outdir):
+    source = Path(outdir) / "ingress-source"
+    if source.exists():
+        shutil.rmtree(source)
+    (source / "src").mkdir(parents=True)
+    shutil.copyfile(ROOT / "src/__init__.py", source / "src/__init__.py")
+    for package in ("receiver", "dispatcher", "utils"):
+        (source / "src" / package).mkdir()
+        for path in (ROOT / "src" / package).glob("*.py"):
+            shutil.copyfile(path, source / "src" / package / path.name)
+    return str(source)
 
 
 # Add the signed issue receiver for the supplied image settings and queue; return its public URL without introducing a construct scope.
@@ -32,10 +47,8 @@ def create_receiver(scope, image, jobs):
         scope,
         "IssueReceiver",
         runtime=lambda_.Runtime.PYTHON_3_13,
-        handler="handler.handle",
-        code=lambda_.Code.from_asset(
-            str(ROOT / "src/receiver"), exclude=["__pycache__", "*.pyc"]
-        ),
+        handler="src.receiver.handler.handle",
+        code=lambda_.Code.from_asset(stage_source(scope.node.root.outdir)),
         timeout=Duration.seconds(30),
         log_group=receiver_logs,
         role=receiver_role,
@@ -61,7 +74,7 @@ def create_receiver(scope, image, jobs):
 
 
 # Add the dispatcher and filtered stream mapping for the supplied queue/workflow; keep resources in the existing stack scope and return nothing.
-def create_dispatcher(scope, jobs, machine):
+def create_dispatcher(scope, image, jobs, machine):
     dispatcher_logs = logs.LogGroup(
         scope, "DispatcherLogs", removal_policy=RemovalPolicy.RETAIN
     )
@@ -75,16 +88,17 @@ def create_dispatcher(scope, jobs, machine):
         scope,
         "Dispatcher",
         runtime=lambda_.Runtime.PYTHON_3_13,
-        handler="handler.handle",
-        code=lambda_.Code.from_asset(
-            str(ROOT / "src/dispatcher"), exclude=["__pycache__", "*.pyc"]
-        ),
+        handler="src.dispatcher.handler.handle",
+        code=lambda_.Code.from_asset(stage_source(scope.node.root.outdir)),
         timeout=Duration.seconds(30),
         log_group=dispatcher_logs,
         role=dispatcher_role,
         environment={
             "JOB_TABLE_NAME": jobs.table_name,
             "STATE_MACHINE_ARN": machine.state_machine_arn,
+            "AUTHORIZED_REPOSITORY": image.repository,
+            "PR_TARGET_BRANCH": image.target_branch,
+            "GITHUB_SECRET_ARN": image.github_secret_arn,
         },
     )
     dispatcher.add_to_role_policy(
@@ -101,6 +115,12 @@ def create_dispatcher(scope, jobs, machine):
                 "dynamodb:GetShardIterator",
             ],
             resources=[jobs.table_stream_arn],
+        )
+    )
+    dispatcher.add_to_role_policy(
+        iam.PolicyStatement(
+            actions=["secretsmanager:GetSecretValue"],
+            resources=[image.github_secret_arn],
         )
     )
     machine.grant_start_execution(dispatcher)

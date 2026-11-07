@@ -53,6 +53,44 @@ class InfrastructureTests(unittest.TestCase):
             {"Environment": {"Variables": {"GITHUB_SECRET_ARN": receiver_secret_arn}}},
         )
 
+    def test_dispatcher_uses_deployment_scope_and_shared_resolver_asset(self):
+        functions = self.workflow_template.find_resources("AWS::Lambda::Function")
+        dispatcher = functions["DispatcherD4A12972"]["Properties"]
+        receiver = functions["IssueReceiver854600CC"]["Properties"]
+        self.assertEqual(
+            dispatcher["Environment"]["Variables"],
+            {
+                "AUTHORIZED_REPOSITORY": self.workflow.resolve(self.image.repository),
+                "PR_TARGET_BRANCH": self.workflow.resolve(self.image.target_branch),
+                "GITHUB_SECRET_ARN": self.workflow.resolve(
+                    self.image.github_secret_arn
+                ),
+                "JOB_TABLE_NAME": {"Ref": "JobsTable1970BC16"},
+                "STATE_MACHINE_ARN": {"Ref": "Workflow"},
+            },
+        )
+        self.assertEqual(dispatcher["Handler"], "src.dispatcher.handler.handle")
+        self.assertEqual(receiver["Handler"], "src.receiver.handler.handle")
+        self.assertEqual(dispatcher["Code"], receiver["Code"])
+        from src.infra.ingress import stage_source
+
+        source = Path(stage_source(self.directory.name))
+        self.assertEqual(
+            sorted(
+                str(path.relative_to(source))
+                for path in source.rglob("*")
+                if path.is_file()
+            ),
+            [
+                "src/__init__.py",
+                "src/dispatcher/handler.py",
+                "src/receiver/__init__.py",
+                "src/receiver/handler.py",
+                "src/utils/__init__.py",
+                "src/utils/job_utils.py",
+            ],
+        )
+
     def test_ingress_construct_scopes_and_logical_ids_remain_stable(self):
         expected = {
             "JobsTable": "JobsTable1970BC16",
@@ -210,6 +248,9 @@ class InfrastructureTests(unittest.TestCase):
                 "dynamodb:PutItem": table_arn,
             },
             dispatcher["Role"]["Fn::GetAtt"][0]: {
+                "secretsmanager:GetSecretValue": self.workflow.resolve(
+                    self.image.github_secret_arn
+                ),
                 "dynamodb:Query": table_arn,
                 "dynamodb:UpdateItem": table_arn,
                 "dynamodb:DescribeStream": stream_arn,
