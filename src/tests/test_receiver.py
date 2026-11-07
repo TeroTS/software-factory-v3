@@ -58,7 +58,7 @@ class ReceiverTests(unittest.TestCase):
             {"sha": "b" * 40}
         ).encode()
         connection = patch(
-            "src.receiver.handler.http.client.HTTPSConnection",
+            "http.client.HTTPSConnection",
             return_value=self.connection,
         )
         connection.start()

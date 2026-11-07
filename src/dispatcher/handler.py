@@ -6,14 +6,9 @@ from contextlib import closing
 
 import boto3
 from boto3.dynamodb.types import TypeDeserializer
-from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
 
-from src.receiver.handler import _load_config, _resolve_baseline
-
-AWS_CONFIG = Config(
-    connect_timeout=5, read_timeout=10, retries={"total_max_attempts": 1}
-)
+from src.utils.job_utils import AWS_CONFIG, load_config, resolve_baseline
 
 
 # Claim the oldest returned pending Job, persist its latest configured target SHA, then start one workflow; failures retain the claim.
@@ -54,11 +49,11 @@ def handle(event, context):
             ExpressionAttributeValues={":status": {"S": "IN_PROGRESS"}},
         )
         try:
-            config = _load_config(webhook=False)
+            config = load_config()
             job = TypeDeserializer().deserialize(item["job"])
             if config is None or job["repository"] != config["repository"]:
                 raise ValueError("Invalid deployment configuration or repository")
-            baseline = _resolve_baseline(session, config)
+            baseline = resolve_baseline(session, config)
             if baseline is None:
                 raise ValueError("Unresolved execution baseline")
             client.update_item(

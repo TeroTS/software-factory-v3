@@ -13,7 +13,7 @@ def handle(event, context):
     if baseline is None:
         result = handler.handle(event, context)
     else:
-        with patch.object(handler, "_resolve_baseline", return_value=baseline):
+        with patch.object(handler, "resolve_baseline", return_value=baseline):
             result = handler.handle(event, context)
     for record in event.get("Records", []):
         image = record.get("dynamodb", {}).get("NewImage", {})

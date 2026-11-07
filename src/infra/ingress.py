@@ -17,7 +17,7 @@ def stage_source(outdir):
         shutil.rmtree(source)
     (source / "src").mkdir(parents=True)
     shutil.copyfile(ROOT / "src/__init__.py", source / "src/__init__.py")
-    for package in ("receiver", "dispatcher"):
+    for package in ("receiver", "dispatcher", "utils"):
         (source / "src" / package).mkdir()
         for path in (ROOT / "src" / package).glob("*.py"):
             shutil.copyfile(path, source / "src" / package / path.name)

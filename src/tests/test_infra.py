@@ -86,6 +86,8 @@ class InfrastructureTests(unittest.TestCase):
                 "src/dispatcher/handler.py",
                 "src/receiver/__init__.py",
                 "src/receiver/handler.py",
+                "src/utils/__init__.py",
+                "src/utils/job_utils.py",
             ],
         )
 
