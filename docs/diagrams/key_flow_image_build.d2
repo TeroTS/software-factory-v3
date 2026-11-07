@@ -1,0 +1,23 @@
+title: "Image creation — once per version\nCurrent hooks; AWS lifecycle is not live-verified here" {
+  shape: text
+}
+flow: {
+  shape: sequence_diagram
+  operator: "Operator / CDK"
+  aws: "AWS Lambda MicroVMs"
+  build: "Image-build server :8080"
+  snapshot: "Reusable snapshot"
+  validation: "Image-validation server :8080"
+
+  operator -> aws: "Deploys current staged source and image configuration"
+  aws -> build: "Starts application via Docker CMD"
+  aws -> build: "POST /aws/lambda-microvms/runtime/v1/ready"
+  build -> aws: "200; no Job or credential retrieval"
+  aws -> snapshot: "Captures ready listener with empty runtime state"
+  aws -> validation: "Restores snapshot for validation"
+  aws -> validation: "POST /aws/lambda-microvms/runtime/v1/validate"
+  validation -> validation: "Checks tools and real workspace-write sandbox execution"
+  validation -> aws: "200 passed; 503 on local validation failure"
+  aws -> operator: "Returns new image version after successful build/validation"
+  operator -> aws: "Verifies exact source and SUCCESSFUL/ACTIVE before pinning"
+}

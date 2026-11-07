@@ -1,5 +1,11 @@
 # AWS Lambda MicroVM Software Factory PoC
 
+**Historical task brief, not the current implementation specification.** The
+implemented workflow now includes signed issue ingestion, a DynamoDB Job queue,
+fresh review, and gated automatic merge. See [current architecture](docs/architecture.md)
+and the [current workflow summary](docs/plans/human-readable/aws-lambda-microvm-software-factory-poc.md).
+The original planning request below is preserved for context.
+
 ## Objective
 
 Evaluate AWS Lambda MicroVMs as isolated execution environments for an AI-powered software factory and create a practical plan for a minimal proof of concept (PoC).

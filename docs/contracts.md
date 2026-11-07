@@ -1,5 +1,7 @@
 # Interface Contracts
 
+See [current architecture](architecture.md), [Job records](data-model.md), and
+[running/verification](running.md) for implementation context.
 
 AWS-owned submission mappings and the target-repository script boundary for the
 software factory PoC. Our HTTP interfaces and shared payload schemas are defined
@@ -7,7 +9,8 @@ software factory PoC. Our HTTP interfaces and shared payload schemas are defined
 
 ## Operator → Step Functions: start a job
 
-**Operation:** AWS `StartExecution`, called through the AWS CLI or SDK in Gate 2.
+**Operation:** AWS `StartExecution`, called through the AWS CLI or SDK, including
+the named direct-test operator tool.
 
 Transport: AWS API through CLI or SDK. Direction: request/reply.
 This is an AWS-owned interface, not an endpoint in our worker server.
@@ -43,7 +46,9 @@ Jobs until the direct execution's MicroVM termination is confirmed.
 ## Dispatcher → Step Functions: start a queued Job
 
 The Dispatcher calls the same AWS `StartExecution` operation with
-`input = JSON.stringify({jobs: [Job], queue: {PK: "JOBS", SK: enqueueTimestamp}})`.
+`input` is JSON serialization of `{jobs: [Job], queue: {PK: "JOBS", SK: enqueueTimestamp}}`.
+The dispatcher omits `name`, so AWS chooses the execution name; the workflow uses
+that name as its VM launch client token.
 Before startup, the Dispatcher unconditionally claims the oldest returned pending
 Job as `IN_PROGRESS`, resolves only the deployment-configured target in the
 authorized repository using the configured repository-scoped GitHub secret, and
@@ -123,8 +128,8 @@ Authoritative contract: this section.
 | --- | --- | --- |
 | Worker → repository `./scripts/setup` | Execute from the pinned repository root. | After checkout, before baseline verification and Codex. |
 | Worker → repository `./scripts/verify` | Execute from the pinned repository root. | After successful setup, before Codex. |
-| Codex → repository `./scripts/verify` | Execute from the working repository root. | Passing final verification is required before commit, push, and PR creation in the same agent invocation. |
-| Worker → repository `./scripts/verify` | Independently execute from the working repository root. | After the agent invocation, before reporting automated completion. |
+| Implementation/repair Codex → repository `./scripts/verify` | Execute from the working repository root. | Verify changes within that invocation, then return without commit, push, PR creation, or merge. |
+| Worker → repository `./scripts/verify` | Independently execute from the working repository root. | After implementation or repair, before the worker commits the candidate for fresh review; again after review PASS and before publication. |
 
 No additional Job fields or script-specific JSON request payload are defined.
 Setup and test tooling belong to the target repository scripts, not hardcoded
@@ -150,7 +155,7 @@ repository and `main`; changing configuration does not grant token permissions.
 Another live repository requires explicit trust/scoping review and separately
 authorized configuration/deployment. Repository scripts execute with access to
 the runtime role and GitHub token; Codex's sandbox does not remove that exposure.
-No allowlist, multi-repository token, or Job-supplied authorization is defined.
+No multi-repository allowlist/token or Job-supplied authorization is defined.
 
 ### Response
 
@@ -174,9 +179,12 @@ No allowlist, multi-repository token, or Job-supplied authorization is defined.
 | AWS credentials | Use the AWS SDK credential provider chain and SDK/service errors for missing, expired, or denied credentials. The worker registers discovered values for log redaction; it does not export CLI credentials, validate account/role or expiry itself, or perform a final rotation check. Deployment/operator configuration is responsible for selecting the intended credentials. |
 | Repository authorization | Read `openapi.yaml#/components/schemas/Job`. |
 
-## Sequence diagrams
+## Diagrams
 
-| Exchange | Rendered diagram |
+D2 sources are checked in; rendered SVG exports are not retained.
+
+| Exchange | Diagram |
 | --- | --- |
-| Image creation: one snapshot per image version | [Image-build sequence](diagrams/key_flow_image_build.svg) |
-| Job launch, polling, termination: reuse the pinned snapshot | [Job-lifecycle sequence](diagrams/key_flow_job_lifecycle.svg) |
+| Signed receipt, queue claim, and runtime boundaries | [System context](diagrams/system_context.d2) |
+| Image creation: one snapshot per image version | [Image-build sequence source](diagrams/key_flow_image_build.d2) |
+| Job launch, review/merge, polling, and confirmed termination | [Job-lifecycle sequence source](diagrams/key_flow_job_lifecycle.d2) |

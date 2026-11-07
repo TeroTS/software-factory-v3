@@ -20,7 +20,7 @@ paths:
     post:
       operationId: receiveIssue
       summary: Request a pinned Job from a signed issue-opening delivery
-      description: 'Accept only issues/opened in the deployment-authorized repository, excluding PRs. Verify HMAC-SHA256 over the original HTTP body bytes (not reserialized JSON). Capture title and body, separated by two newlines when the body is nonempty; a null/empty body yields title only. Resolve the deployment-owned target branch to a full SHA with the existing scoped GitHub token, then conditionally store the existing Job schema in DynamoDB as PENDING. Payload fields cannot select credentials or target configuration. Duplicate delivery may request duplicate/concurrent billable Jobs; receipt is not completion.'
+      description: 'Accept only issues/opened in the deployment-authorized repository, excluding PRs. Verify HMAC-SHA256 over the original HTTP body bytes (not reserialized JSON). Capture title and body, separated by two newlines when the body is nonempty; a null/empty body yields title only. Resolve the deployment-owned target branch to a full SHA with the existing scoped GitHub token, then conditionally store the existing Job schema in DynamoDB as PENDING. Payload fields cannot select credentials or target configuration. Duplicate delivery may enqueue duplicate billable Jobs; there is no delivery deduplication. Serialized dispatch remains an operator assumption because claims are non-atomic and queries read one page. Receipt is not completion.'
       security:
         - GitHubSignature: []
       parameters:
@@ -285,7 +285,7 @@ components:
         baseSha:
           type: string
           minLength: 1
-          description: Full baseline commit SHA checked during checkout. Webhook receipt stores the receipt-time target SHA; queued dispatch refreshes and persists this same field to the latest deployment-configured target SHA after claiming the Job and before workflow startup. Resolution or persistence failure blocks without fallback. Direct tests retain their explicitly supplied pinned SHA.
+          description: Full 40-character hexadecimal baseline commit SHA validated before worker startup and checked during checkout. Webhook receipt stores the receipt-time target SHA; queued dispatch refreshes and persists this same field to the latest deployment-configured target SHA after claiming the Job and before workflow startup. Resolution or persistence failure blocks without fallback. Direct tests retain their explicitly supplied pinned SHA.
         task:
           type: string
           minLength: 1

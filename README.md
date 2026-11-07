@@ -1,7 +1,9 @@
 # software-factory-v3
 
-A proof of concept for turning one coding task into a tested GitHub PR inside an
-AWS Lambda MicroVM, then confirming VM termination.
+A proof of concept that turns a signed GitHub issue or operator-submitted task
+into a tested, reviewed, merged PR inside an AWS Lambda MicroVM, then confirms
+VM termination. Queued Jobs run under operator-controlled single-Job discipline;
+this is not a production concurrency guarantee.
 
 ## Quick start
 
@@ -18,7 +20,7 @@ make verify
 
 Setup creates `.venv` using `uv.lock` and installs the repository-local CDK CLI
 using `package-lock.json`; nothing is installed globally. Verification
-checks Python formatting, lint, tests through coverage.
+checks Python formatting, lint, tests through coverage, and logging.
 
 ## Development
 
@@ -34,55 +36,39 @@ checks Python formatting, lint, tests through coverage.
 | `make verify` | Run formatting checks, lint, coverage/tests, and logging. |
 | `make synth` | Synthesize native CDK templates/assets locally; no deployment. |
 | `make preflight` | Build the ARM64 image and check real sandbox/search/edit/tests/Git plus simulated-service worker/lifecycle tests. |
-| `make floci-test` | Run local signed-webhook/SQS/Pipes/Standard tests and report known MicroVM lifecycle gaps; requires Docker. |
+| `make floci-test` | Run local signed-webhook, DynamoDB/Streams dispatch, and Standard entry-state tests with simulated VM lifecycle tasks; requires Docker. |
 | `make floci-down` | Stop the task-local emulator and GitHub fixture containers. |
 
-The separate demonstration repository,
+The default authorized demonstration repository is
 [TeroTS/factory-smoke-test](https://github.com/TeroTS/factory-smoke-test).
 
-### Live AWS/GitHub test
+## Live use and documentation
 
-```sh
-uv run --locked python -m src.tools.validate_deploy_image
-# Set IMAGE_VERSION to the verified version printed by the first stage.
-uv run --locked python -m src.tools.deploy_infra --version "$IMAGE_VERSION"
-```
+Live Jobs perform billable model work and a gated automatic merge into the
+configured target. Deployment and live Jobs require separate authorization.
+Follow [running and verification](docs/running.md) for deployment prerequisites,
+private webhook configuration, direct-test preparation, and interrupted-run
+handling; direct tests must not overlap queued work.
 
-You choose `EXECUTION_NAME`: it is a unique label and AWS idempotency key, not an
-ID obtained from AWS. For a **new Job only**, generate one and copy the
-[example Job](src/tools/happy-path-job.json) to a temporary absolute path:
-
-```sh
-EXECUTION_NAME="happy-path-$(uv run --locked python -c 'import uuid; print(uuid.uuid4().hex)')"
-JOB_FILE="$(mktemp "${TMPDIR:-/tmp}/factory-happy-path.XXXXXX")"
-cp src/tools/happy-path-job.json "$JOB_FILE"
-printf 'Retain EXECUTION_NAME=%s\nRetain JOB_FILE=%s\n' "$EXECUTION_NAME" "$JOB_FILE"
-```
-
-Edit the copied file: replace `baseSha` with the full 40-character SHA of your
-reviewed, tested baseline. Obtain it with `git rev-parse HEAD` in the target
-repository.
-
-```sh
-uv run --locked python -m src.tools.run_happy_path \
-  --name "$EXECUTION_NAME" --job-file "$JOB_FILE"
-```
-
-After interruption, reuse the **same name and unchanged Job file**; do not rerun
-the preparation commands or generate a new name. Retain the printed values and
-file for recovery. The script checks the PR and confirmed VM termination; it
-never merges.
+- [Architecture](docs/architecture.md): components, queueing, and runtime flows.
+- [Operations](docs/operations.md): configuration, trust, logs, and failure limits.
+- [Interface contracts](docs/contracts.md) and [OpenAPI](openapi.yaml): submission
+  mappings, repository scripts, and HTTP payloads.
+- [Job records](docs/data-model.md) and [factory skills](docs/factory-skills.md):
+  record semantics and the bundled agent stages.
 
 ## Repository structure
 
-- [CONTEXT.md](CONTEXT.md): canonical domain vocabulary.
+- [GLOSSARY.md](GLOSSARY.md): canonical domain vocabulary.
 - [AGENTS.md](AGENTS.md): guidance for coding agents.
 - [Makefile](Makefile), [pyproject.toml](pyproject.toml), and [uv.lock](uv.lock):
   local commands, configuration, and pinned development dependencies.
-- `src/tools/`: non-production development smoke check.
-- `src/tests/`: standard-library worker/lifecycle/infrastructure tests.
-- `src/receiver/`: signed GitHub issue receiver; queues pinned Jobs without changing worker interfaces.
-- `src/worker/`: snapshot-safe lifecycle HTTP server, asynchronous worker, and
-  command/source/publication evidence verification.
-- `image/`: package-managed ARM64 Dockerfile and fixed demonstration acceptance.
-- `src/infra/`: native CDK app/stacks and Step Functions ASL.
+- `src/receiver/`, `src/dispatcher/`, `src/utils/`: signed issue ingestion, queued
+  dispatch, and shared authorization/baseline utilities.
+- `src/worker/`: snapshot-safe lifecycle server and worker verification,
+  review, publication, and merge gates.
+- `src/infra/`: native CDK stacks and Step Functions workflow definition.
+- `src/tools/`: local logging, image-pin verification, deployment, and live-run tools.
+- `src/tests/`: standard-library tests and explicit Docker/live checks.
+- `image/`: ARM64 Dockerfile, pinned runtime dependencies, managed Codex policy,
+  and factory skill bundle.

@@ -3,20 +3,25 @@
 ## Repository Overview
 
 This is an operator-led AWS Lambda MicroVM software factory PoC.
-Never update README.md or AGENTS.md with ticket implementation related info. 
+Keep README.md and AGENTS.md current for setup, navigation, and agent guidance;
+put ticket-specific implementation details in the relevant ticket or docs.
 
 ## Repository Structure
 
-- `worker/`: lifecycle/status server, asynchronous worker, and completion evidence.
-- `infra/`: native Python CDK app/stacks and Standard workflow definition.
-- `image/`: ARM64 Dockerfile and fixed demonstration acceptance check.
-- `tools/logging_smoke.py`: non-production local logging check.
-- `tools/verify_image.py`: read-only new-source/version pin verification.
-- `tests/`: standard-library tests; `test_sandbox.py` runs explicitly in Docker.
+- `src/receiver/`, `src/dispatcher/`, `src/utils/`: issue ingestion, queued dispatch,
+  and shared authorization/baseline utilities.
+- `src/worker/`: lifecycle/status server, worker, review, and completion gates.
+- `src/infra/`: native Python CDK stacks and Standard workflow definition.
+- `src/tools/`: local logging, read-only image-pin checks, deployment, and live-run tools.
+- `src/tests/`: standard-library tests; sandbox, emulator, and live checks are explicit.
+- `image/`: ARM64 Dockerfile, runtime dependencies, managed Codex policy, and skills.
 - `Makefile`: shared setup and verification commands.
 - `pyproject.toml`, `uv.lock`, `.python-version`: tooling configuration, pinned
   development dependencies, and local Python selection.
-- `docs/plans/`: proposed architecture and gate documentation.
+- `docs/architecture.md`, `docs/running.md`, `docs/operations.md`: current flows,
+  commands, and operational limits.
+- `openapi.yaml`, `docs/contracts.md`: HTTP schemas and non-HTTP boundaries.
+- `docs/plans/`: planning material; check each document's status.
 - `docs/aws-lambda-microvms/`: copied AWS reference documentation.
 
 ## Development Workflow
@@ -24,7 +29,8 @@ Never update README.md or AGENTS.md with ticket implementation related info.
 Use Python 3.14, `uv`, Make, and Node.js/npm for CDK; jsii recommends Node 22/24
 LTS. Ruff, coverage.py, CDK, and constructs are development-only dependencies
 pinned in `uv.lock`; the local CDK CLI is pinned in `package-lock.json`. Worker
-runtime code uses the standard library and image-installed CLIs.
+runtime uses Python 3.13, the standard library, pinned boto3, and image-installed
+CLIs.
 Run commands from the repository root:
 
 ```sh
@@ -43,7 +49,13 @@ make dev
 make format
 make synth
 make preflight
+make floci-test
+make floci-down
 ```
+
+Deployment, live inference, and GitHub writes require separate authorization;
+local verification does not require credentials. See `docs/running.md` before
+using live tools.
 
 ## Agent skills
 
@@ -57,7 +69,8 @@ Use the five default triage roles. Before triaging, read `docs/agents/triage-lab
 
 ### Domain docs
 
-Single-context: `GLOSSARY.md` and `docs/adr/`. Before exploring terms or decisions, read `docs/agents/domain.md`.
+Single-context: `GLOSSARY.md`; ADRs live in `docs/adr/` if present. Before exploring
+terms or decisions, read `docs/agents/domain.md`.
 
 ## Commenting Convention
 
@@ -72,5 +85,6 @@ Exemptions:
 
 ## Change Guidelines
 
-Run the relevant focused tests and `make verify` after changes, and report actual
-results and gaps.
+For code changes, run relevant focused tests and `make verify`; report actual
+results and gaps. For documentation-only changes, check affected links,
+formatting, and diagrams without running tests.

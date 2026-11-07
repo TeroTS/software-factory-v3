@@ -43,14 +43,14 @@
 <body>
 <main>
   <header>
-    <p class="eyebrow">Service architecture · Gate 2 · Operator-led proof of concept</p>
-    <h1>One coding task. A tested PR. A terminated VM.</h1>
-    <p class="intro">Step Functions coordinates one Job inside an isolated AWS Lambda MicroVM. The worker runs Codex, checks publication evidence, and exposes status until orchestration confirms cleanup.</p>
+    <p class="eyebrow">Service architecture · Direct runtime view · Proof of concept</p>
+    <h1>One coding task. A reviewed, merged PR. A terminated VM.</h1>
+    <p class="intro">Step Functions coordinates one Job inside an isolated AWS Lambda MicroVM. Separate Codex stages implement, review, publish, and perform a gated merge. The worker independently confirms merged PR state; orchestration confirms cleanup. Queued issue ingress joins the same workflow.</p>
   </header>
   <div class="diagram-container">
     <svg viewBox="0 0 1280 720" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="service-architecture-title service-architecture-desc">
       <title id="service-architecture-title">Software factory PoC — service architecture</title>
-      <desc id="service-architecture-desc">An operator starts a Step Functions Job that launches a pinned Lambda MicroVM, polls its worker, and confirms termination after the worker uses Secrets Manager, Amazon Bedrock, and GitHub to produce a tested, unmerged PR.</desc>
+      <desc id="service-architecture-desc">A direct operator test starts a pinned Lambda MicroVM through Step Functions, polls its worker, and confirms termination after independent verification, fresh review, and gated GitHub merge; queued Jobs join the same runtime.</desc>
       <defs>
         <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/></marker>
         <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#bf4520"/></marker>
@@ -107,7 +107,7 @@
         <rect x="292" y="168" width="64" height="12" rx="2" fill="none" stroke="#bf4520"/>
         <text x="324" y="177" text-anchor="middle" class="tag">WORKFLOW</text>
         <text x="296" y="200" class="name">AWS Step Functions</text>
-        <text x="296" y="220" class="sub">Standard · one Job at a time</text>
+        <text x="296" y="220" class="sub">Standard · one VM per execution</text>
       </g>
       <g>
         <rect x="560" y="160" width="200" height="72" rx="6" fill="#ffffff" stroke="#2d3142"/>
@@ -128,7 +128,7 @@
         <rect x="564" y="520" width="48" height="12" rx="2" fill="none" stroke="#5a6580"/>
         <text x="588" y="529" text-anchor="middle" class="tag">WORKER</text>
         <text x="568" y="552" class="name">Job worker + Codex CLI</text>
-        <text x="568" y="572" class="sub">setup → baseline tests → task → evidence</text>
+        <text x="568" y="572" class="sub">implement → review → publish → gated merge</text>
       </g>
       <g>
         <rect x="1000" y="272" width="240" height="72" rx="6" fill="#f5f5f5"/>
@@ -144,7 +144,7 @@
         <rect x="1012" y="400" width="64" height="12" rx="2" fill="none" stroke="#5a6580"/>
         <text x="1044" y="409" text-anchor="middle" class="tag">EXTERNAL</text>
         <text x="1016" y="432" class="name">GitHub demonstration repository</text>
-        <text x="1016" y="452" class="sub">Clone baseline · push branch · open PR</text>
+        <text x="1016" y="452" class="sub">Clone · publish reviewed head · merge</text>
       </g>
       <g>
         <rect x="1000" y="512" width="240" height="72" rx="6" fill="#ffffff" stroke="#2d3142"/>
@@ -155,7 +155,7 @@
       </g>
 
       <text x="280" y="52" class="note">Launch pinned image version; reuse execution name as client token.</text>
-      <text x="280" y="72" class="note">Terminate on success or failure; confirm TERMINATED before success.</text>
+      <text x="280" y="72" class="note">Caught post-launch outcomes terminate; timeout/stop use lifespan fallback.</text>
       <text x="40" y="520" class="zone-label">AUTHENTICATED STATUS</text>
       <text x="40" y="544" class="note">AWS proxy token scoped to port 8080.</text>
       <text x="40" y="564" class="note">Step Functions HTTP task uses an EventBridge Connection.</text>
@@ -175,12 +175,12 @@
   </div>
   <section class="details" aria-label="Architecture notes">
     <div>
-      <h2>Success means evidence, not agent prose</h2>
-      <p>The worker reruns <code>./scripts/verify</code> and checks the committed change, baseline ancestry, clean workspace, remote branch/head, and exactly one matching open, unmerged PR. Human review still judges correctness; the factory never merges.</p>
+      <h2>Success requires reviewed, merged evidence</h2>
+      <p>The worker reruns <code>./scripts/verify</code>, commits the candidate, and requires fresh structured review PASS within three passes. Independent checks bind clean local, remote, and PR heads before a fresh exact-head merge request. GitHub protection remains authoritative; matching MERGED PR state is independently confirmed. AI review is heuristic, not proof of correctness.</p>
     </div>
     <div>
-      <h2>Runtime view, not deployment topology</h2>
-      <p>Native Python CDK builds the artifact, image, and workflow stacks. S3 image-build assets, IAM details, CloudWatch log paths, and individual retry states are omitted. The worker uses internet egress; the VM boundary is not a VPC claim.</p>
+      <h2>Direct runtime view; queued ingress omitted</h2>
+      <p>Signed issues enter DynamoDB; Streams invokes the dispatcher to claim a Job and persist its latest target SHA before workflow startup. Only merged success plus TERMINATED completes queued work. Claims are non-atomic and reads one-page: serialization remains an operator assumption. See <a href="system_context.d2">system context</a> and <a href="../architecture.md">architecture</a>. Build assets, IAM details, and log paths are omitted; the VM boundary is not a VPC claim.</p>
     </div>
   </section>
   <footer>

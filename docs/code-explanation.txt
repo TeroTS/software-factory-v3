@@ -1,30 +1,43 @@
-src/worker/task.py runs one controlled coding job inside a MicroVM, then checks that the agent really completed it.
+Current implementation overview: docs/architecture.md
+Local commands and live-tool precautions: docs/running.md
 
-For example, adding multiply(a, b):
+src/receiver/handler.py authenticates signed GitHub issues/opened deliveries,
+captures the issue title/body, resolves the deployment-configured target SHA,
+and conditionally inserts a PENDING Job in DynamoDB. HTTP 202 is receipt only.
 
-1. Validates the job and temporary AWS credentials.
-2. Retrieves the GitHub token, clones the pinned repository revision, and creates a unique branch.
-3. Runs baseline tests.
-4. Starts one Codex invocation to edit, test, commit, push, and open a pull request.
-5. Independently checks tests, permitted changes, commit ancestry, remote branch, and PR.
+src/dispatcher/handler.py queries for active work, then claims the oldest returned
+pending Job. It resolves and persists the latest configured target SHA before
+starting Step Functions with one Job plus its queue reference. Preparation or
+uncertain startup failure retains IN_PROGRESS. Selection is one-page/non-atomic;
+serialized dispatch and a small queue remain operator assumptions.
 
-Logging redacts credentials. Failures return exit code 1; verified completion returns 0.
+src/utils/job_utils.py shares ingress configuration validation and target-baseline
+resolution. Jobs cannot choose repository authorization, target branch, or secret.
 
-------
+src/worker/task.py coordinates one Job inside a MicroVM:
+1. Validates the bounded Job and deployment authorization; discovers SDK credentials.
+2. Retrieves the scoped GitHub token, clones the pinned baseline, and creates a branch.
+3. Runs the target repository's executable ./scripts/setup and ./scripts/verify.
+4. Runs fresh ephemeral Codex implementation; independently verifies and commits.
+5. Runs fresh structured Standards/Spec review, with at most three review passes
+   and bounded repair on valid FAIL evidence. Invalid evidence fails closed.
+6. Independently verifies again, checks the reviewed candidate is unchanged, then
+   runs a separate publication process for that commit and exactly one matching PR.
+7. Gates a fresh exact-head merge request and independently confirms the matching
+   PR is MERGED on GitHub. Only then does the worker exit zero.
+Known credentials are redacted from logged command/agent output. Failures exit 1.
 
-src/worker/server.py is the MicroVM’s control server, not the coding worker. It listens on port
-8080.
+src/worker/server.py listens on port 8080. Ready/validate are snapshot-safe;
+only run starts src.worker.task asynchronously. Runtime tracks pending/ok/error
+and stops the worker's process group on terminate. AWS ingress owns authentication.
 
-- parse_job() validates incoming job data.
-- Runtime starts src.worker.task once, tracks its exit, and terminates its process group.
-- make_server() exposes lifecycle hooks: ready, validate, run, terminate.
-- /status returns pending, ok, or error.
+src/infra/workflow.py accepts direct [Job] or queued {jobs: [Job], queue}. It launches
+one pinned VM, checks startup every five seconds, reuses one port-8080 JWE for status
+polling every ten seconds, then requests termination and checks every five seconds.
+Only verified worker success plus TERMINATED completes queued work. Failures retain
+the active blocker. Timeout/manual stop bypass cleanup; VM lifespan is the fallback.
 
-Example: a run request starts the worker and returns promptly. Polling shows pending until
-the worker exits: 0 means ok; otherwise error.
-
-Validation checks installed tools and sandbox execution. Authentication belongs to AWS
-ingress.
-
-------
-
+src/infra/app.py composes FactoryArtifacts, FactoryImage, and FactoryWorkflow.
+image/ packages Python 3.13, pinned CLIs, managed Codex policy, and immutable skills.
+src/tools/ provides local logging, read-only image-pin checks, deployment tools,
+and the named direct-test observer. Local simulations are not live-provider proof.

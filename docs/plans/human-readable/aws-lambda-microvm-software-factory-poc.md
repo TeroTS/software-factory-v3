@@ -1,40 +1,64 @@
 # AWS Lambda MicroVM Software Factory PoC
 
-**Status:** Proposed, not implemented. Live end-to-end execution remains unverified.
+**Status:** Implemented in repository code. This document does not establish
+current live deployment state or end-to-end AWS/model/GitHub verification.
 
 ## What it does
 
-The service turns a small coding task into a tested GitHub pull request. It runs Codex in an isolated AWS Lambda MicroVM—a temporary virtual machine—and shuts the machine down when the job finishes. A human reviews and merges the PR.
+The factory turns a small coding task into a tested, AI-reviewed, merged GitHub
+pull request inside a temporary AWS Lambda MicroVM, then confirms shutdown.
+The worker authorizes merge only after independent checks; this is no longer a
+PR-only workflow waiting for a human merge.
 
 ## Main workflow
 
-1. **Submit a task.** The operator manually starts an AWS Step Functions workflow with a GitHub repository, a pinned starting commit, and a task.
-2. **Start the workspace.** Step Functions launches one MicroVM from a reusable image containing Codex and the repository’s development tools.
-3. **Prepare the repository.** The worker inside the VM retrieves the GitHub token, clones the repository, checks out the starting commit, creates a task branch, and installs dependencies.
-4. **Implement and test.** One Codex invocation edits the code, runs the approved tests, and fixes failures until the tests pass. Codex uses Amazon Bedrock for model inference; all edits, shell commands, and tests run inside the VM.
-5. **Publish the result.** After passing tests with an actual code change, Codex commits, pushes the branch, and creates a GitHub PR. It does not merge it.
-6. **Finish and clean up.** Step Functions polls the worker’s HTTPS status endpoint while the task runs. Once tests pass and PR creation is confirmed, the worker reports success. Step Functions terminates the VM, confirms shutdown, and completes successfully.
+1. **Submit a task.** A signed issue-opening delivery from the authorized GitHub
+   repository captures title/body and enters the DynamoDB queue. HTTP 202 means
+   queued, not completed. Non-overlapping direct operator tests remain available.
+2. **Claim the next Job.** DynamoDB Streams invokes the dispatcher. If no Job is
+   active, it claims the oldest returned pending Job, resolves the latest configured
+   target branch, and persists that SHA as the execution baseline before startup.
+3. **Start the workspace.** Step Functions launches a pinned ARM64 image. The
+   worker retrieves the scoped GitHub token, clones the baseline onto a unique
+   branch, and runs the repository's setup and verification scripts.
+4. **Implement and review.** A fresh Codex process edits and tests. The worker
+   independently verifies and commits, then runs a separate Standards/Spec review.
+   Valid FAIL findings allow repair and fresh review within three review passes.
+5. **Publish and merge.** After passing review and final independent verification,
+   a separate process publishes the reviewed commit and opens a PR. An independent
+   worker gate authorizes a fresh exact-head merge honoring GitHub protection.
+   The worker independently confirms that matching PR is MERGED.
+6. **Clean up before releasing work.** Step Functions polls status, terminates
+   the VM, and confirms TERMINATED. Only merged success plus confirmed shutdown
+   marks the queued Job COMPLETED, allowing the next claim to use the latest target.
 
 ```text
-Task → Step Functions → MicroVM: clone → code → test → create PR
-                  ↓
-          Confirm result → shut down VM
+Signed issue → Receiver → DynamoDB → Dispatcher → Step Functions → MicroVM
+                            ↑                         │
+                            └── COMPLETED only after ─┘
+                                merged PR + TERMINATED
 ```
 
 ## Where things live
 
-- **GitHub:** source repository, task branch, and PR.
-- **CloudWatch:** execution logs.
-- **Secrets Manager:** GitHub token, retrieved only at runtime.
-- **Amazon Bedrock:** the selected GPT-6.1 Sol model, accessed using the VM’s AWS role rather than a model API key.
+- **GitHub:** authorized source repository, task branch, and merged PR.
+- **DynamoDB:** enqueue-ordered Jobs and active blockers.
+- **CloudWatch:** redacted worker/stage output and ingress logs.
+- **Secrets Manager:** deployment-controlled repository-scoped GitHub token.
+- **Amazon Bedrock:** pinned model accessed with AWS SDK/runtime credentials.
+- **Native Python CDK:** artifact storage, image, and workflow/ingress resources.
 
-Step Functions manages the VM, not the coding loop. No local controller needs to stay running. The worker reports only success or an error; code and logs remain in GitHub and CloudWatch.
+## Limits and verification
 
-## Proving the PoC
+Keep one dispatcher at a time, a queue fitting the first query page, and no
+concurrent direct tests. Selection/claims do not enforce serialization. Failures,
+exhausted review, timeout, stop, and unconfirmed cleanup retain IN_PROGRESS; there
+is no automatic retry, reset, skip, or failed-Job release. Timeout/stop bypasses
+normal cleanup; a 30-minute VM lifespan is the fallback.
 
-1. **Prove execution first:** manually launch the VM, complete a real coding task through PR creation, and confirm shutdown.
-2. **Add orchestration:** build a clean implementation with native Python CDK, then demonstrate the full Step Functions workflow and failure cleanup. Replace the old infrastructure rather than importing its CloudFormation template; preserve the GitHub-token secret and published PR. The Dockerfile and useful server code are starting points, not a requirement to retain the throwaway worker/tests.
+AI review is heuristic and GitHub is trusted as merge authority. Local tests and
+Floci simulations do not prove live model behavior, GitHub policy enforcement,
+or deployed concurrency safety.
 
-Use one controlled repository and run one task at a time. Credentials must be restricted to the required resources. A maximum VM lifespan limits resource use if orchestration stops unexpectedly.
-
-See the [original plan](../aws-lambda-microvm-software-factory-poc.md) for implementation details, remaining proposals, and verification requirements.
+See [current architecture](../../architecture.md), [running](../../running.md),
+[operations](../../operations.md), and [contracts](../../contracts.md).

@@ -1,0 +1,12 @@
+direction: down
+title: "Software factory — native CDK deployment" {
+  shape: text
+}
+artifacts: "FactoryArtifacts\nPrivate retained S3 asset bucket"
+image: "FactoryImage\nNative ARM64 image; build/runtime roles\nEmpty retained GitHub secret; retained logs"
+workflow: "FactoryWorkflow\nExplicit ImageVersion pin; Standard workflow\nConnection, queue, receiver, dispatcher, stream mapping"
+vm: "Per-Job Lambda MicroVM\nPython 3.13 lifecycle server + worker\nPinned tools and immutable factory skills"
+artifacts -> image: "supplies staged source assets"
+image -> workflow: "supplies image, role, secret, authorization, logs"
+artifacts -> workflow: "supplies ingress code assets"
+workflow -> vm: "launches verified image version"

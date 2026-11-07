@@ -1,5 +1,8 @@
 # Factory skill bundle
 
+See [current architecture](architecture.md) for queued dispatch and completion,
+and [operations](operations.md) for deployment authorization and runtime limits.
+
 The four skills in `image/skills/` are VM deployment assets, not repository-local
 agent skills. They do not participate in this repository's `.agents/skills/`
 discovery; development agents can use their globally installed skills instead.
@@ -15,13 +18,29 @@ invocation using the canonical PR skill. Success requires independently confirme
 GitHub merged state for the expected PR and reviewed head, plus confirmed VM
 termination. Merge parent structure and current target ancestry are not inspected.
 
+## Worker stage selection
+
+Each stage uses a distinct ephemeral `codex exec` process with a canonical skill
+path selected by [worker prompts](../src/worker/prompts.py), not a same-named skill
+in the cloned repository.
+
+| Stage | Canonical skill | Worker-owned boundary |
+| --- | --- | --- |
+| Implementation / repair | `implement/SKILL.md` | Agent verifies and returns without commit/push/PR/merge; worker independently verifies and commits. |
+| Fresh review | `code-review/SKILL.md` | Candidate-bound structured evidence and unchanged Git state; at most three review passes. |
+| Publication | `pr/SKILL.md` | Publish only the existing reviewed commit after final independent verification; no merge permission. |
+| Authorized merge | `pr/SKILL.md` | Fresh exact-head invocation after independent gate; confirm matching GitHub MERGED PR state afterward. |
+
+Paths above are relative to `/opt/factory/skills/`. Failed or ambiguous publication
+and merge are inspected without retrying the agent stage or duplicating the PR.
+
 ## Reference inventory
 
 Every skill includes `SKILL.md` and `agents/openai.yaml`.
 
 | Skill | Bundled references and dependencies |
 | --- | --- |
-| implement | Reads tdd; returns to the worker for independent review. |
+| implement | Reads tdd; returns without publication so the worker can independently verify, commit, and request fresh review. |
 | code-review | Covers Standards and Spec in one read-only conversation. |
 | pr | Includes `CREDITS.md`; upstream show-me URLs are attribution, not executable dependencies. |
 | tdd | Includes `tests.md` and `mocking.md`; links to read-only review guidance. |

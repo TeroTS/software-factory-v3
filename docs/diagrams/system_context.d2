@@ -1,0 +1,24 @@
+direction: right
+title: "Software factory — current system boundaries" {
+  shape: text
+}
+github: "GitHub\nAuthorized repository, issues, merged PRs"
+receiver: "Signed issue receiver"
+queue: "Job queue\nPENDING / IN_PROGRESS / COMPLETED" {
+  shape: cylinder
+}
+dispatcher: "Dispatcher\nClaim and refresh baseline"
+operator: "Operator\nNon-overlapping direct tests"
+workflow: "Standard workflow\nPinned image; confirmed cleanup"
+vm: "Lambda MicroVM\nLifecycle server + worker + ephemeral Codex stages"
+bedrock: "Amazon Bedrock\nPinned model"
+github -> receiver: "delivers signed issues/opened"
+receiver -> queue: "inserts receipt-time Job"
+queue -> dispatcher: "notifies via filtered Streams"
+dispatcher -> queue: "checks, claims, persists latest target SHA"
+dispatcher -> workflow: "starts singleton Job + queue reference"
+operator -> workflow: "starts pinned [Job]"
+workflow -> vm: "launches, polls, terminates, confirms"
+workflow -> queue: "completes only after merged success + termination"
+vm -> github: "clones, publishes reviewed head, gated merge, confirms"
+vm -> bedrock: "invokes model"

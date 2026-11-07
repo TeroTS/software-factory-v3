@@ -1,0 +1,16 @@
+direction: right
+title: "Job boundary records — current implementation" {
+  shape: text
+}
+queue: "Queue item\nComposite key: JOBS + enqueue timestamp\nstatus: PENDING / IN_PROGRESS / COMPLETED"
+job: "Job\nrepository\nbaseSha: receipt SHA, refreshed on queued claim\ntask: captured title/body or direct input"
+execution: "Workflow execution\nAWS execution identity\nsingleton Job\nqueue reference?\nMicroVM ID"
+review: "Fresh review result\ncandidateHead\nverdict: PASS / FAIL\nrequiredFindings"
+pr: "GitHub PR\nnumber, repository\ntarget branch, task branch, reviewed head\nstate: OPEN → MERGED\nmergedAt"
+status: "Worker status\nstatus: pending / ok / error"
+queue -> job: "contains"
+execution -> job: "runs"
+execution -> queue: "references only for queued work"
+review -> pr: "binds published candidate head"
+execution -> pr: "requires matching confirmed merged state"
+execution -> status: "polls derived process state"
