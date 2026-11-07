@@ -17,6 +17,32 @@ def main():
     review_heads = []
 
     def agent(*args):
+        cli, prompt, repository, env, _secrets = args
+        if "Independent worker gate authorizes merge" in prompt and scenario in (
+            "merge-denied",
+            "merge-conflict",
+            "merge-auto-only",
+            "merge-unresolved",
+            "merge-timeout",
+            "merge-local-change",
+            "merge-head-race",
+            "merge-checks-pending",
+            "merge-checks-fail",
+            "merge-checks-cancel",
+            "merge-checks-error",
+        ):
+            fixture.agent_calls += 1
+            fixture.stages.append("merge")
+            fixture.events.append("merge")
+            if scenario == "merge-local-change":
+                (repository / "greeting.txt").write_text("unreviewed\n")
+            if scenario == "merge-head-race":
+                fixture.prs[0]["headRefOid"] = fixture.sha
+            if scenario == "merge-auto-only":
+                fixture.prs[0]["autoMergeRequest"] = {"enabled": True}
+            if scenario != "merge-auto-only":
+                raise subprocess.CalledProcessError(1, ["gh", "pr", "merge"])
+            return
         result = original_agent(*args)
         cli, _prompt, repository, env, _secrets = args
         stage = fixture.stages[-1]
@@ -137,9 +163,62 @@ def main():
                 ).strip()
             if scenario in ("publication-edit", "repair-publication-edit"):
                 (repository / "greeting.txt").write_text("publisher edit\n")
+            if scenario == "gate-dirty":
+                (repository / "gate.txt").write_text("unreviewed\n")
+            if scenario == "gate-head-change":
+                fixture.git(
+                    "update-ref",
+                    "refs/heads/" + fixture.prs[0]["headRefName"],
+                    fixture.sha,
+                )
+            if scenario == "gate-cross-repository":
+                fixture.prs[0]["isCrossRepository"] = True
+            if scenario == "gate-wrong-target":
+                fixture.prs[0]["baseRefName"] = "wrong"
+            if scenario == "gate-wrong-branch":
+                fixture.prs[0]["headRefName"] = "wrong"
+            if scenario == "gate-duplicate-pr":
+                fixture.prs.append(dict(fixture.prs[0]))
+            if scenario == "gate-already-merged":
+                fixture.prs[0].update(state="MERGED", mergedAt="now")
+        if stage == "merge":
+            if scenario == "merge-branch-deleted":
+                fixture.git("branch", "-d", fixture.prs[0]["headRefName"])
+            if scenario == "merge-lost-response":
+                raise subprocess.CalledProcessError(1, ["gh", "pr", "merge"])
+            if scenario == "merge-wrong-pr":
+                fixture.prs[0]["number"] = 3
+            if scenario == "merge-target-advance":
+                (fixture.origin / "later.txt").write_text("legitimate advancement\n")
+                fixture.git("add", ".")
+                fixture.git("commit", "-m", "later target change")
+            if scenario == "merge-state-only":
+                # GitHub's merged state is authoritative even if target history is later rewritten.
+                fixture.git("update-ref", "refs/heads/release", fixture.sha)
         return result
 
     def external(args, cwd, env, secrets=None):
+        if (
+            args[:2] == ["gh", "api"]
+            and fixture.stages
+            and fixture.stages[-1] == "publish"
+        ):
+            if scenario == "gate-repository-change":
+                return json.dumps(
+                    {"full_name": "wrong/repository", "allow_merge_commit": True}
+                )
+            if scenario == "merge-method-prohibited":
+                return json.dumps(
+                    {
+                        "full_name": fixture.job["repository"],
+                        "allow_merge_commit": False,
+                    }
+                )
+        if (
+            args == ["git", "remote", "get-url", "origin"]
+            and scenario == "gate-origin-change"
+        ):
+            return "https://github.com/wrong/repository.git"
         if (
             args == ["./scripts/verify"]
             and len(review_heads) == 3

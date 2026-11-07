@@ -1,6 +1,7 @@
 import http.client
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -15,8 +16,11 @@ class JobOutcomeTests(test_worker.WorkerFixture, test_workflow.WorkflowFixture):
     def setUp(self):
         test_worker.WorkerFixture.setUp(self)
         test_workflow.WorkflowFixture.setUp(self)
+        self.baseline_origin = self.origin
 
     def run_outcome(self, scenario):
+        self.origin = self.root / (scenario + "-origin")
+        shutil.copytree(self.baseline_origin, self.origin)
         if scenario in ("setup-failure", "baseline-verification-failure"):
             script = "setup" if scenario == "setup-failure" else "verify"
             (self.origin / "scripts" / script).write_text(
@@ -116,6 +120,8 @@ class JobOutcomeTests(test_worker.WorkerFixture, test_workflow.WorkflowFixture):
             self.assertEqual(args["MicrovmIdentifier"], "microvm-test")
             self.assertEqual(request("POST", HOOK + "terminate"), (200, b""))
             terminated = True
+            if scenario == "cleanup-after-merge":
+                return RuntimeError("simulated cleanup failure")
             return {}
 
         def confirm(args):
@@ -144,12 +150,26 @@ class JobOutcomeTests(test_worker.WorkerFixture, test_workflow.WorkflowFixture):
             "publication-ambiguous-success",
             "repair-pass-2",
             "repair-pass-3",
+            "merge-lost-response",
+            "merge-target-advance",
+            "merge-state-only",
+            "merge-branch-deleted",
+            "checks-absent",
+            "checks-not-required",
+            "checks-pass",
         )
-        expected_status = "ok" if success else "error"
+        worker_success = success or scenario == "cleanup-after-merge"
+        expected_status = "ok" if worker_success else "error"
         self.assertEqual(kind, "Succeed" if success else "Fail")
         self.assertEqual(final, "JobSucceeded" if success else "JobFailed")
-        self.assertEqual(result["status"], expected_status)
-        self.assertEqual(result["termination"], "TERMINATED")
+        self.assertEqual(
+            result["status"],
+            "error" if scenario == "cleanup-after-merge" else expected_status,
+        )
+        if scenario != "cleanup-after-merge":
+            self.assertEqual(result["termination"], "TERMINATED")
+        else:
+            self.assertEqual(result["error"], "CleanupUnconfirmed")
         self.assertEqual(result["microvmId"], "microvm-test")
         self.assertEqual(observations, [{"status": expected_status}])
         self.assertEqual(
@@ -157,14 +177,13 @@ class JobOutcomeTests(test_worker.WorkerFixture, test_workflow.WorkflowFixture):
             (200, json.dumps(observations[0], separators=(",", ":")).encode()),
         )
         names = [name for name, _ in calls]
-        for state in (
-            "LaunchVM",
-            "GetWorkerToken",
-            "TerminateVM",
-            "GetTerminationState",
-        ):
+        for state in ("LaunchVM", "GetWorkerToken", "TerminateVM"):
             self.assertEqual(names.count(state), 1)
-        self.assertLess(names.index("TerminateVM"), names.index("GetTerminationState"))
+        if scenario != "cleanup-after-merge":
+            self.assertEqual(names.count("GetTerminationState"), 1)
+            self.assertLess(
+                names.index("TerminateVM"), names.index("GetTerminationState")
+            )
         self.assertEqual(names.count("CompleteQueuedJob"), int(success))
         if success:
             self.assertLess(
@@ -193,22 +212,33 @@ class JobOutcomeTests(test_worker.WorkerFixture, test_workflow.WorkflowFixture):
                         expected_stages += ["publish"]
             elif not review_failure:
                 expected_stages += ["publish"]
+        if "publish" in expected_stages and (
+            worker_success
+            or scenario.startswith("merge-")
+            and scenario != "merge-method-prohibited"
+        ):
+            expected_stages += ["merge"]
         self.assertEqual(publication["stages"], expected_stages)
         self.assertEqual(publication["agent_calls"], len(expected_stages))
         expected_prs = int(
             "publish" in expected_stages and scenario != "publication-failure"
         )
-        self.assertEqual(len(publication["prs"]), expected_prs)
+        self.assertEqual(
+            len(publication["prs"]),
+            2 if scenario == "gate-duplicate-pr" else expected_prs,
+        )
         if review_failure:
             failure = "ReviewRejected" if scenario == "review-fail" else "ReviewError"
             self.assertIn("Worker failed: " + failure, logs.read_text())
-        if success:
+        if worker_success:
             pr = publication["prs"][0]
             self.task.verify_pr(
                 publication["prs"],
                 pr["headRefName"],
-                self.git("rev-parse", pr["headRefName"]).strip(),
+                publication["reviewed_head"],
                 "release",
+                merged=True,
+                number=2,
             )
             self.assertIn("Verified repository script", logs.read_text())
             rounds = (
@@ -222,7 +252,7 @@ class JobOutcomeTests(test_worker.WorkerFixture, test_workflow.WorkflowFixture):
                 publication["events"],
                 ["./scripts/setup", "./scripts/verify"]
                 + ["implement", "./scripts/verify", "review"] * rounds
-                + ["./scripts/verify", "publish"],
+                + ["./scripts/verify", "publish", "merge"],
             )
             self.assertEqual(publication["reviewed_head"], pr["headRefOid"])
             self.assertEqual(
@@ -239,8 +269,56 @@ class JobOutcomeTests(test_worker.WorkerFixture, test_workflow.WorkflowFixture):
             self.assertNotIn(secret, logs.read_text())
             self.assertNotIn(secret, json.dumps(result))
 
-    def test_successful_publication_and_confirmed_termination(self):
+    def test_successful_gated_merge_and_confirmed_termination(self):
         self.run_outcome("success")
+
+    def test_merge_failures_keep_job_blocking(self):
+        for scenario in (
+            "gate-dirty",
+            "gate-head-change",
+            "gate-cross-repository",
+            "gate-wrong-target",
+            "gate-wrong-branch",
+            "gate-duplicate-pr",
+            "gate-already-merged",
+            "gate-repository-change",
+            "gate-origin-change",
+            "merge-checks-pending",
+            "merge-checks-fail",
+            "merge-checks-cancel",
+            "merge-checks-error",
+            "merge-denied",
+            "merge-conflict",
+            "merge-method-prohibited",
+            "merge-auto-only",
+            "merge-unresolved",
+            "merge-timeout",
+            "merge-local-change",
+            "merge-head-race",
+            "merge-wrong-pr",
+        ):
+            with self.subTest(scenario=scenario):
+                self.run_outcome(scenario)
+
+    def test_no_required_checks_and_passing_required_checks_are_eligible(self):
+        for scenario in ("checks-absent", "checks-not-required", "checks-pass"):
+            with self.subTest(scenario=scenario):
+                self.run_outcome(scenario)
+
+    def test_lost_merge_response_and_later_target_advancement_can_succeed(self):
+        for scenario in (
+            "merge-lost-response",
+            "merge-target-advance",
+            "merge-branch-deleted",
+        ):
+            with self.subTest(scenario=scenario):
+                self.run_outcome(scenario)
+
+    def test_github_merged_state_is_authoritative_without_target_history_proof(self):
+        self.run_outcome("merge-state-only")
+
+    def test_cleanup_failure_after_merge_does_not_release_job(self):
+        self.run_outcome("cleanup-after-merge")
 
     def test_same_named_repository_skills_do_not_replace_canonical_stage_paths(self):
         self.run_outcome("skill-collision")

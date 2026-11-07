@@ -123,7 +123,7 @@ class Workflow(Stack):
             state_machine_type=sfn.StateMachineType.STANDARD,
             role=role,
             timeout=Duration.minutes(28),
-            comment="One VM coordinates implementation, verification, fresh review and unmerged PR publication; timeout/StopExecution rely on VM lifespan and manual recovery.",
+            comment="One VM coordinates implementation, verification, fresh review, gated PR merge and independent GitHub merged-state confirmation; completion also requires confirmed termination. Timeout/StopExecution rely on VM lifespan and manual recovery.",
             definition_body=sfn.DefinitionBody.from_chainable(
                 definition(
                     self,

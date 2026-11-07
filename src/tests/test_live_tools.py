@@ -366,6 +366,12 @@ class LiveToolsTests(unittest.TestCase):
         self.assertNotIn("never-print-jwe", output.getvalue())
         self.assertIn("microvm-test", output.getvalue())
         self.assertEqual(confirm.call_count, 0 if existing else 1)
+        if not existing:
+            self.assertIn("billable Job", confirm.call_args.args[0])
+            self.assertIn(
+                "merge commit into owner/repository:main", confirm.call_args.args[0]
+            )
+            self.assertNotIn("no merge", confirm.call_args.args[0])
         self.assertEqual(idle.call_count, 0 if existing else 2)
 
     def test_new_job_starts_exact_identity_once_and_proves_cleanup(self):
@@ -480,19 +486,24 @@ class LiveToolsTests(unittest.TestCase):
             "Review verdict PASS for commit "
             + "b"
             * 40
-            + "\nAgent process actual exit code 0\n"
+            + "\nIndependently verify repository candidate\n"
+            "Command completed: ./scripts/verify; actual exit code 0\n"
+            "Agent process actual exit code 0\n"
             "Independently confirm reviewed publication\n"
-            "Verified repository script, nonempty commit, baseline ancestry and one agent-published unmerged PR; fresh review PASS for commit "
+            "Independent worker gate authorizes merge of PR 1 at " + "b" * 40 + "\n"
+            "Agent process actual exit code 0\nIndependently confirm merged PR\n"
+            "Verified repository script, nonempty commit, baseline ancestry and independently verified merged PR; fresh review PASS for commit "
             + "b" * 40
-            + "; merge not authorized"
+            + "; GitHub merged PR confirmed"
         )
         pr = {
             "number": 1,
-            "state": "OPEN",
-            "mergedAt": None,
+            "state": "MERGED",
+            "mergedAt": "now",
             "baseRefName": "main",
             "headRefName": "factory/task-abc",
             "headRefOid": "b" * 40,
+            "isCrossRepository": False,
         }
         comparison = {
             "merge_base_commit": {"sha": "a" * 40},
@@ -531,8 +542,7 @@ class LiveToolsTests(unittest.TestCase):
                         live,
                         "output",
                         side_effect=[
-                            json.dumps([pr]),
-                            json.dumps({"object": {"sha": head}}),
+                            json.dumps([{**pr, "headRefOid": head}]),
                             json.dumps(compare),
                             "diff",
                         ],
@@ -555,6 +565,32 @@ class LiveToolsTests(unittest.TestCase):
                             module.inspect_publication(
                                 Mock(), "microvm-test", "5.0", self.job, "main"
                             )
+
+        for changed_pr in (
+            {**pr, "state": "OPEN", "mergedAt": None},
+            {**pr, "number": 2},
+            {**pr, "mergedAt": None},
+            {**pr, "headRefOid": "c" * 40},
+            {**pr, "baseRefName": "wrong"},
+            {**pr, "headRefName": "wrong"},
+            {**pr, "isCrossRepository": True},
+        ):
+            with (
+                self.subTest(pr=changed_pr),
+                patch.object(module, "worker_logs", return_value=logs),
+                patch.object(
+                    live,
+                    "output",
+                    side_effect=[
+                        json.dumps([changed_pr]),
+                        json.dumps(comparison),
+                    ],
+                ),
+                self.assertRaises(ValueError),
+            ):
+                module.inspect_publication(
+                    Mock(), "microvm-test", "5.0", self.job, "main"
+                )
 
     def test_workflow_readback_and_prospective_validation_use_resolved_synthesis(self):
         live = self.module("live")
