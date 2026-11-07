@@ -380,22 +380,15 @@ def verify_remote_publication(job, repository, branch, head, env):
     verify_pr(prs, branch, head, env["PR_TARGET_BRANCH"])
 
 
-# Validate and coordinate one Job's stages; complete only after independent review/publication evidence.
-def execute(job):
-    job = parse_job({"microvmId": "runtime", "runHookPayload": json.dumps(job)})
-    secrets = []
-    env = prepare_environment(secrets)
-    repository, branch = prepare_repository(job, env, secrets)
-    invoke_agent(job, repository, branch, env, secrets)
-    verify_candidate(repository, env, secrets)
-    head = commit_candidate(repository, branch, env, secrets)
+# Review/repair a committed candidate within three passes; return passing head/count/addressed findings or fail closed.
+def review_and_repair_candidate(job, repository, branch, head, env, secrets):
     addressed = []
     for review_count in range(1, 4):
         verdict, findings = review_candidate(
             job, repository, branch, head, env, secrets
         )
         if verdict == "PASS":
-            break
+            return head, review_count, addressed
         if review_count == 3:
             raise ReviewRejected("Review budget exhausted after three passes")
         findings = [
@@ -419,6 +412,20 @@ def execute(job):
         verify_candidate(repository, env, secrets)
         addressed.append({"candidateHead": head, "findings": findings})
         head = commit_candidate(repository, branch, env, secrets)
+
+
+# Validate and coordinate one Job's stages; complete only after independent review/publication evidence.
+def execute(job):
+    job = parse_job({"microvmId": "runtime", "runHookPayload": json.dumps(job)})
+    secrets = []
+    env = prepare_environment(secrets)
+    repository, branch = prepare_repository(job, env, secrets)
+    invoke_agent(job, repository, branch, env, secrets)
+    verify_candidate(repository, env, secrets)
+    head = commit_candidate(repository, branch, env, secrets)
+    head, review_count, addressed = review_and_repair_candidate(
+        job, repository, branch, head, env, secrets
+    )
     verify_candidate(repository, env, secrets)
     verify_review_unchanged(repository, branch, head, env)
     publish_candidate(
