@@ -491,16 +491,15 @@ class LiveToolsTests(unittest.TestCase):
             "Agent process actual exit code 0\n"
             "Independently confirm reviewed publication\n"
             "Independent worker gate authorizes merge of PR 1 at " + "b" * 40 + "\n"
-            "Agent process actual exit code 0\nIndependently confirm merged integration\n"
+            "Agent process actual exit code 0\nIndependently confirm merged PR\n"
             "Verified repository script, nonempty commit, baseline ancestry and independently verified merged PR; fresh review PASS for commit "
             + "b" * 40
-            + "; merged integration confirmed"
+            + "; GitHub merged PR confirmed"
         )
         pr = {
             "number": 1,
             "state": "MERGED",
             "mergedAt": "now",
-            "mergeCommit": {"oid": "d" * 40},
             "baseRefName": "main",
             "headRefName": "factory/task-abc",
             "headRefOid": "b" * 40,
@@ -545,11 +544,6 @@ class LiveToolsTests(unittest.TestCase):
                         side_effect=[
                             json.dumps([{**pr, "headRefOid": head}]),
                             json.dumps(compare),
-                            json.dumps(
-                                {"parents": [{"sha": "a" * 40}, {"sha": "b" * 40}]}
-                            ),
-                            json.dumps({"object": {"sha": "e" * 40}}),
-                            json.dumps({"merge_base_commit": {"sha": "d" * 40}}),
                             "diff",
                         ],
                     ),
@@ -572,16 +566,17 @@ class LiveToolsTests(unittest.TestCase):
                                 Mock(), "microvm-test", "5.0", self.job, "main"
                             )
 
-        for changed_pr, parents, ancestor in (
-            ({**pr, "state": "OPEN", "mergedAt": None}, ["a" * 40, "b" * 40], "d" * 40),
-            ({**pr, "number": 2}, ["a" * 40, "b" * 40], "d" * 40),
-            ({**pr, "mergeCommit": None}, ["a" * 40, "b" * 40], "d" * 40),
-            (pr, ["b" * 40], "d" * 40),
-            (pr, ["b" * 40, "a" * 40], "d" * 40),
-            (pr, ["a" * 40, "b" * 40], "a" * 40),
+        for changed_pr in (
+            {**pr, "state": "OPEN", "mergedAt": None},
+            {**pr, "number": 2},
+            {**pr, "mergedAt": None},
+            {**pr, "headRefOid": "c" * 40},
+            {**pr, "baseRefName": "wrong"},
+            {**pr, "headRefName": "wrong"},
+            {**pr, "isCrossRepository": True},
         ):
             with (
-                self.subTest(pr=changed_pr, parents=parents, ancestor=ancestor),
+                self.subTest(pr=changed_pr),
                 patch.object(module, "worker_logs", return_value=logs),
                 patch.object(
                     live,
@@ -589,11 +584,6 @@ class LiveToolsTests(unittest.TestCase):
                     side_effect=[
                         json.dumps([changed_pr]),
                         json.dumps(comparison),
-                        json.dumps(
-                            {"parents": [{"sha": parent} for parent in parents]}
-                        ),
-                        json.dumps({"object": {"sha": "e" * 40}}),
-                        json.dumps({"merge_base_commit": {"sha": ancestor}}),
                     ],
                 ),
                 self.assertRaises(ValueError),

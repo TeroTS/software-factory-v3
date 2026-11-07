@@ -189,7 +189,7 @@ def definition(
         parameters={"body.$": "States.JsonToString($.response.ResponseBody)"},
         result_path="$.status",
     )
-    # Accept pending or independently proven merged integration (ok); any other reply fails.
+    # Accept pending or independently confirmed GitHub merged PR state (ok); any other reply fails.
     check_status = sfn.Choice(scope, "CheckWorkerStatus")
     # Wait ten seconds before checking the worker again.
     worker_wait = sfn.Wait(
@@ -282,7 +282,7 @@ def definition(
         api.add_catch(cleanup_failure, result_path="$.failure")
     terminate.next(termination_wait).next(get_termination).next(check_terminated)
 
-    # Mark a queued Job complete only after independently proven merged integration and confirmed VM termination.
+    # Mark a queued Job complete only after confirmed GitHub merged PR state and confirmed VM termination.
     complete_queued_job = tasks.CallAwsService(
         scope,
         "CompleteQueuedJob",

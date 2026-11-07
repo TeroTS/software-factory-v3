@@ -152,6 +152,7 @@ class JobOutcomeTests(test_worker.WorkerFixture, test_workflow.WorkflowFixture):
             "repair-pass-3",
             "merge-lost-response",
             "merge-target-advance",
+            "merge-state-only",
             "merge-branch-deleted",
             "checks-absent",
             "checks-not-required",
@@ -295,11 +296,6 @@ class JobOutcomeTests(test_worker.WorkerFixture, test_workflow.WorkflowFixture):
             "merge-local-change",
             "merge-head-race",
             "merge-wrong-pr",
-            "merge-one-parent",
-            "merge-wrong-parent",
-            "merge-three-parents",
-            "merge-no-ancestry",
-            "merge-missing-commit",
         ):
             with self.subTest(scenario=scenario):
                 self.run_outcome(scenario)
@@ -317,6 +313,9 @@ class JobOutcomeTests(test_worker.WorkerFixture, test_workflow.WorkflowFixture):
         ):
             with self.subTest(scenario=scenario):
                 self.run_outcome(scenario)
+
+    def test_github_merged_state_is_authoritative_without_target_history_proof(self):
+        self.run_outcome("merge-state-only")
 
     def test_cleanup_failure_after_merge_does_not_release_job(self):
         self.run_outcome("cleanup-after-merge")

@@ -1,4 +1,4 @@
-# Submit or observe one named Job; verify merged integration and service-confirmed cleanup without reruns.
+# Submit or observe one named Job; confirm GitHub merged PR state and service-confirmed cleanup without reruns.
 import json
 import os
 import re
@@ -121,7 +121,7 @@ def worker_logs(session, vm_id, version):
     )
 
 
-# Correlate review/gate logs with merged PR identity and target ancestry; display only the reviewed PR diff.
+# Correlate review/gate logs with the matching GitHub merged PR and candidate baseline; display only the reviewed diff.
 def inspect_publication(session, vm_id, version, job, target):
     logs = worker_logs(session, vm_id, version)
     branches = set(
@@ -141,8 +141,8 @@ def inspect_publication(session, vm_id, version, job, target):
         or "Command completed: ./scripts/verify; actual exit code 0"
         not in verification[-1].split("Fresh review of commit")[0]
         or "Independently confirm reviewed publication" not in logs
-        or "Independently confirm merged integration" not in logs
-        or "; merged integration confirmed" not in logs
+        or "Independently confirm merged PR" not in logs
+        or "; GitHub merged PR confirmed" not in logs
         or len(gates) != 1
         or gates[0][1] != reviewed[0]
     ):
@@ -163,10 +163,10 @@ def inspect_publication(session, vm_id, version, job, target):
             "--state",
             "all",
             "--json",
-            "number,state,mergedAt,baseRefName,headRefName,headRefOid,mergeCommit,isCrossRepository",
+            "number,state,mergedAt,baseRefName,headRefName,headRefOid,isCrossRepository",
         )
     )
-    # The source ref may be automatically deleted after merge; PR head and merge parents retain its identity.
+    # The source ref may be automatically deleted after merge; GitHub's merged PR retains its head identity.
     remote = reviewed[0]
     pr = verify_pr(prs, branch, remote, target, merged=True, number=int(gates[0][0]))
     comparison = json.loads(
@@ -184,28 +184,6 @@ def inspect_publication(session, vm_id, version, job, target):
         raise live.OperatorError(
             "Published change is empty or not descended from the pinned baseline"
         )
-    merge = (pr.get("mergeCommit") or {}).get("oid")
-    if not isinstance(merge, str) or not re.fullmatch(r"[0-9a-f]{40}", merge):
-        raise live.OperatorError("Missing merge commit identity")
-    commit = json.loads(
-        live.output("gh", "api", "repos/" + repository + "/git/commits/" + merge)
-    )
-    if len(commit.get("parents", [])) != 2 or commit["parents"][1]["sha"] != remote:
-        raise live.OperatorError(
-            "Merge commit does not integrate the reviewed head as second parent"
-        )
-    current_target = json.loads(
-        live.output("gh", "api", "repos/" + repository + "/git/ref/heads/" + target)
-    )["object"]["sha"]
-    integration = json.loads(
-        live.output(
-            "gh",
-            "api",
-            "repos/" + repository + "/compare/" + merge + "..." + current_target,
-        )
-    )
-    if integration["merge_base_commit"]["sha"] != merge:
-        raise live.OperatorError("Merge commit is not an ancestor of current target")
     number = str(pr["number"])
     print(redact(live.output("gh", "pr", "diff", number, "--repo", repository), []))
     return "https://github.com/" + repository + "/pull/" + number
@@ -348,7 +326,7 @@ def execute(session, name, job_file):
         + version
         + "; "
         + str(polls)
-        + " authenticated polls; fresh review PASS; merged integration confirmed; VM TERMINATED."
+        + " authenticated polls; fresh review PASS; GitHub merged PR confirmed; VM TERMINATED."
     )
 
 

@@ -11,8 +11,9 @@ root-owned under `/opt/factory/skills/`, with factory-user native discovery thro
 skill paths and enforce independent verification and review-before-publication.
 The worker preserves a bounded three-pass review/repair budget, then publishes the
 reviewed commit. Only an independent worker gate permits a fresh exact-head merge
-invocation using the canonical PR skill. Success requires independently proven
-merge-commit integration into the configured target and confirmed VM termination.
+invocation using the canonical PR skill. Success requires independently confirmed
+GitHub merged state for the expected PR and reviewed head, plus confirmed VM
+termination. Merge parent structure and current target ancestry are not inspected.
 
 ## Reference inventory
 

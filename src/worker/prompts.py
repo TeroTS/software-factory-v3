@@ -62,7 +62,7 @@ Repositories with no required checks are eligible; do not add a required-check p
 Request exactly: gh pr merge {number} --repo {job["repository"]} --merge --match-head-commit {head}
 Never use --admin, --auto, --squash, --rebase, or conflict repair. If merge commits are prohibited, stop.
 Inspect existing branch/PR state after any lost response; never blindly retry. Return without further action on uncertainty.
-An auto-merge request, prose, or exit code alone is not success; the worker must prove actual integration into {target}.
+An auto-merge request, prose, or exit code alone is not success; the worker must confirm GitHub reports this exact PR and reviewed head as merged into {target}.
 """
     )
 

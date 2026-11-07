@@ -1,4 +1,4 @@
-# Execute one controlled Job inside the VM; exit zero only after independently proven merged integration.
+# Execute one controlled Job inside the VM; exit zero only after confirming the reviewed PR is merged on GitHub.
 import json
 import os
 import re
@@ -360,7 +360,7 @@ def verify_local_candidate(job, repository, branch, reviewed_head, env):
         raise ValueError("Missing nonempty committed change")
 
 
-# Confirm scoped repository access and return merge settings before authorization or after integration.
+# Confirm scoped repository access and return merge settings before authorization or after merged-PR confirmation.
 def verify_repository(job, repository, env):
     settings = json.loads(
         capture(["gh", "api", "repos/" + job["repository"]], repository, env)
@@ -380,7 +380,7 @@ def verify_remote_publication(
     remote = capture(
         ["git", "ls-remote", "--heads", "origin", branch], repository, env
     ).split()
-    # GitHub may delete the task ref after merge; the bound PR head and fetched parents still prove publication.
+    # GitHub may delete the task ref after merge; the matching merged PR retains the reviewed head.
     if remote != [head, "refs/heads/" + branch] and not (merged and not remote):
         raise ValueError("Published branch/head mismatch")
     prs = json.loads(
@@ -396,7 +396,7 @@ def verify_remote_publication(
                 "--state",
                 "all",
                 "--json",
-                "number,state,mergedAt,baseRefName,headRefName,headRefOid,mergeCommit,isCrossRepository",
+                "number,state,mergedAt,baseRefName,headRefName,headRefOid,isCrossRepository",
             ],
             repository,
             env,
@@ -431,40 +431,16 @@ def merge_candidate(job, repository, branch, head, number, env, secrets):
             "Merge process failed; inspect existing Git/PR state without retry",
             flush=True,
         )
-    verify_merged_integration(job, repository, branch, head, number, env)
+    verify_merged_pr(job, repository, branch, head, number, env)
 
 
-# Prove the exact PR merge has two parents, reviewed head second, and ancestry in the independently fetched target.
-def verify_merged_integration(job, repository, branch, head, number, env):
-    print("Independently confirm merged integration", flush=True)
+# Confirm GitHub reports the expected reviewed PR as merged; reject changed candidates and scoped access failures.
+def verify_merged_pr(job, repository, branch, head, number, env):
+    print("Independently confirm merged PR", flush=True)
     verify_local_candidate(job, repository, branch, head, env)
-    pr = verify_remote_publication(
+    verify_remote_publication(
         job, repository, branch, head, env, merged=True, number=number
     )
-    merge = (pr.get("mergeCommit") or {}).get("oid")
-    if not isinstance(merge, str) or not re.fullmatch(r"[0-9a-f]{40}", merge):
-        raise ValueError("Missing merge commit identity")
-    capture(
-        [
-            "git",
-            "fetch",
-            "--no-tags",
-            "origin",
-            "refs/heads/" + env["PR_TARGET_BRANCH"],
-        ],
-        repository,
-        env,
-    )
-    target = capture(["git", "rev-parse", "FETCH_HEAD"], repository, env).strip()
-    capture(["git", "fetch", "--no-tags", "origin", merge], repository, env)
-    parents = capture(
-        ["git", "rev-list", "--parents", "-n", "1", merge], repository, env
-    ).split()
-    if len(parents) != 3 or parents[0] != merge or parents[2] != head:
-        raise ValueError(
-            "Merge commit does not integrate verified head as second parent"
-        )
-    capture(["git", "merge-base", "--is-ancestor", merge, target], repository, env)
     verify_repository(job, repository, env)
 
 
@@ -530,7 +506,7 @@ def execute(job):
     print(
         "Verified repository script, nonempty commit, baseline ancestry and independently verified merged PR; fresh review PASS for commit "
         + head
-        + "; merged integration confirmed",
+        + "; GitHub merged PR confirmed",
         flush=True,
     )
 

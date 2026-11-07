@@ -192,35 +192,9 @@ def main():
                 (fixture.origin / "later.txt").write_text("legitimate advancement\n")
                 fixture.git("add", ".")
                 fixture.git("commit", "-m", "later target change")
-            if scenario in (
-                "merge-one-parent",
-                "merge-wrong-parent",
-                "merge-three-parents",
-            ):
-                head = fixture.reviewed_head
-                tree = fixture.git("rev-parse", "HEAD^{tree}").strip()
-                parents = {
-                    "merge-one-parent": [fixture.sha],
-                    "merge-wrong-parent": [head, fixture.sha],
-                    "merge-three-parents": [
-                        fixture.sha,
-                        head,
-                        fixture.git("rev-parse", "HEAD").strip(),
-                    ],
-                }[scenario]
-                commit = fixture.git(
-                    "commit-tree",
-                    tree,
-                    *[part for parent in parents for part in ("-p", parent)],
-                    "-m",
-                    "invalid merge",
-                ).strip()
-                fixture.git("update-ref", "refs/heads/release", commit)
-                fixture.prs[0]["mergeCommit"] = {"oid": commit}
-            if scenario == "merge-no-ancestry":
+            if scenario == "merge-state-only":
+                # GitHub's merged state is authoritative even if target history is later rewritten.
                 fixture.git("update-ref", "refs/heads/release", fixture.sha)
-            if scenario == "merge-missing-commit":
-                fixture.prs[0]["mergeCommit"] = None
         return result
 
     def external(args, cwd, env, secrets=None):

@@ -281,7 +281,6 @@ class WorkerFixture(unittest.TestCase):
             self.prs[0].update(
                 state="MERGED",
                 mergedAt="2026-01-01T00:00:00Z",
-                mergeCommit={"oid": self.git("rev-parse", "HEAD").strip()},
             )
             return
         self.stages.append("publish")
@@ -306,13 +305,14 @@ class WorkerFixture(unittest.TestCase):
 
 
 class WorkerTests(WorkerFixture):
-    # Completion proves a gated merge of the reviewed head into the real target repository.
+    # Completion trusts the matching GitHub merged PR state without fetching target history or merge metadata.
     def test_success_requires_independently_verified_merge(self):
         metadata_stages = []
 
         def external(args, cwd, env, secrets=None):
             if args[:2] == ["gh", "api"]:
                 metadata_stages.append(self.stages[-1])
+            self.assertNotEqual(args[:2], ["git", "fetch"])
             return self.external(args, cwd, env, secrets)
 
         with (
@@ -323,10 +323,8 @@ class WorkerTests(WorkerFixture):
             self.task.execute(self.job)
         self.assertEqual(self.stages, ["implement", "review", "publish", "merge"])
         self.assertEqual(self.prs[0]["state"], "MERGED")
-        parents = self.git("rev-list", "--parents", "-n", "1", "release").split()
-        self.assertEqual(len(parents), 3)
-        self.assertEqual(parents[2], self.reviewed_head)
-        self.assertIn("Independently confirm merged integration", logs.getvalue())
+        self.assertEqual(self.prs[0]["headRefOid"], self.reviewed_head)
+        self.assertIn("Independently confirm merged PR", logs.getvalue())
         self.assertEqual(metadata_stages, ["publish", "merge"])
 
     # GitHub owns check policy; a denied exact-head merge must leave the Job incomplete without worker check parsing.
