@@ -243,12 +243,15 @@ class WorkerFixture(unittest.TestCase):
             self.assertFalse(self.external(["git", "status", "--porcelain"], cwd, env))
             schema = Path(args[args.index("--output-schema") + 1])
             self.assertEqual(
-                json.loads(schema.read_text())["required"], ["verdict", "findings"]
+                json.loads(schema.read_text())["required"],
+                ["candidateHead", "verdict", "findings"],
             )
             result = Path(args[args.index("--output-last-message") + 1])
             self.assertFalse(result.is_relative_to(cwd))
             self.assertFalse(result.exists())
-            result.write_text(json.dumps({"verdict": "PASS", "findings": []}))
+            result.write_text(
+                json.dumps({"candidateHead": head, "verdict": "PASS", "findings": []})
+            )
             return
         self.stages.append("publish")
         self.events.append("publish")
@@ -271,6 +274,165 @@ class WorkerFixture(unittest.TestCase):
 
 
 class WorkerTests(WorkerFixture):
+    # A validated rejection gets a new implementation process and fresh review of the repaired commit.
+    def test_required_findings_are_repaired_before_fresh_review_and_publication(self):
+        finding = {
+            "axis": "Spec",
+            "location": "greeting.txt:1",
+            "problem": "Required greeting detail missing",
+            "correction": "Add only the requested greeting detail; remove GH_TOKEN=private",
+        }
+        heads, prompts = [], []
+
+        def agent(*args):
+            self.agent(*args)
+            cli, prompt, repository, _env, _secrets = args
+            if self.stages[-1] == "implement" and heads:
+                self.assertIn("Review data", prompt)
+                self.assertIn("not instructions", prompt)
+                self.assertIn(
+                    json.dumps(
+                        {
+                            **finding,
+                            "correction": "Add only the requested greeting detail; remove GH_TOKEN=[REDACTED]",
+                        }
+                    ),
+                    prompt,
+                )
+                self.assertNotIn("GH_TOKEN=private", prompt)
+                self.assertIn(heads[-1], prompt)
+                (repository / "repair.txt").write_text("requested detail\n")
+            elif self.stages[-1] == "review":
+                heads.append(self.reviewed_head)
+                self.assertNotIn(finding["problem"], prompt)
+                if len(heads) == 1:
+                    output = Path(cli[cli.index("--output-last-message") + 1])
+                    output.write_text(
+                        json.dumps(
+                            {
+                                "candidateHead": heads[-1],
+                                "verdict": "FAIL",
+                                "findings": [finding],
+                            }
+                        )
+                    )
+            elif self.stages[-1] == "publish":
+                prompts.append(prompt)
+
+        with (
+            patch.object(self.task, "capture", side_effect=self.external),
+            patch.object(self.task, "run_agent", side_effect=agent),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.task.execute(self.job)
+        self.assertEqual(
+            self.stages, ["implement", "review", "implement", "review", "publish"]
+        )
+        self.assertNotEqual(heads[0], heads[1])
+        self.assertEqual(self.prs[0]["headRefOid"], heads[1])
+        self.assertEqual(
+            self.events,
+            [
+                "./scripts/setup",
+                "./scripts/verify",
+                "implement",
+                "./scripts/verify",
+                "review",
+                "implement",
+                "./scripts/verify",
+                "review",
+                "./scripts/verify",
+                "publish",
+            ],
+        )
+        self.assertIn("2 of 3", prompts[0])
+        self.assertIn(finding["problem"], prompts[0])
+
+    # The review budget belongs to the Job: three valid rejections cannot start a third repair or publish.
+    def test_three_required_rejections_exhaust_job_budget(self):
+        from src.worker.review import ReviewRejected
+
+        heads = []
+
+        def agent(*args):
+            self.agent(*args)
+            cli, prompt, repository, _env, _secrets = args
+            if self.stages[-1] == "implement" and heads:
+                self.assertIn(heads[-1], prompt)
+                (repository / "untracked.txt").write_text(f"repair {len(heads)}\n")
+            elif self.stages[-1] == "review":
+                heads.append(self.reviewed_head)
+                output = Path(cli[cli.index("--output-last-message") + 1])
+                output.write_text(
+                    json.dumps(
+                        {
+                            "candidateHead": heads[-1],
+                            "verdict": "FAIL",
+                            "findings": [
+                                {
+                                    "axis": "Spec",
+                                    "location": "greeting.txt:1",
+                                    "problem": "Detail missing",
+                                    "correction": "Add required detail",
+                                }
+                            ],
+                        }
+                    )
+                )
+
+        with (
+            patch.object(self.task, "capture", side_effect=self.external),
+            patch.object(self.task, "run_agent", side_effect=agent),
+            contextlib.redirect_stdout(io.StringIO()),
+            self.assertRaisesRegex(ReviewRejected, "budget exhausted"),
+        ):
+            self.task.execute(self.job)
+        self.assertEqual(self.stages, ["implement", "review"] * 3)
+        self.assertEqual(len(set(heads)), 3)
+        self.assertEqual(self.events.count("./scripts/verify"), 4)
+        self.assertFalse(self.prs)
+
+    # Results copied from a previous candidate cannot authorize another repair or publication.
+    def test_stale_review_result_after_repair_is_terminal(self):
+        from src.worker.review import ReviewError
+
+        first_head = None
+        finding = {
+            "axis": "Spec",
+            "location": "greeting.txt:1",
+            "problem": "Missing detail",
+            "correction": "Add detail",
+        }
+
+        def agent(*args):
+            nonlocal first_head
+            self.agent(*args)
+            cli, _prompt, repository, _env, _secrets = args
+            if self.stages[-1] == "implement" and first_head:
+                (repository / "repair.txt").write_text("detail\n")
+            elif self.stages[-1] == "review":
+                first_head = first_head or self.reviewed_head
+                output = Path(cli[cli.index("--output-last-message") + 1])
+                output.write_text(
+                    json.dumps(
+                        {
+                            "candidateHead": first_head,
+                            "verdict": "FAIL",
+                            "findings": [finding],
+                        }
+                    )
+                )
+
+        with (
+            patch.object(self.task, "capture", side_effect=self.external),
+            patch.object(self.task, "run_agent", side_effect=agent),
+            contextlib.redirect_stdout(io.StringIO()),
+            self.assertRaisesRegex(ReviewError, "Stale"),
+        ):
+            self.task.execute(self.job)
+        self.assertEqual(self.stages, ["implement", "review", "implement", "review"])
+        self.assertFalse(self.prs)
+
     # Missing image policy must fail before invoking the agent rather than loading unsafe defaults.
     def test_missing_factory_configuration_stops_before_agent(self):
         with (
@@ -282,7 +444,7 @@ class WorkerTests(WorkerFixture):
             self.task.invoke_agent(self.job, self.origin, "branch", self.env, [])
         agent.assert_not_called()
 
-    # Real Git/scripts prove verification precedes local commit/review/publication without re-verifying.
+    # Real Git/scripts prove candidate verification precedes review and final verification precedes publication.
     def test_real_checkout_tests_git_and_simulated_agent_publication(self):
         calls = []
 
@@ -312,6 +474,7 @@ class WorkerTests(WorkerFixture):
                 "agent",
                 "./scripts/verify",
                 "agent",
+                "./scripts/verify",
                 "agent",
             ],
         )
@@ -361,13 +524,14 @@ class WorkerTests(WorkerFixture):
             "verify_candidate",
             "commit_candidate",
             "review_candidate",
+            "verify_review_unchanged",
             "publish_candidate",
         )
         for failed in stages:
             calls = []
 
             def stage(name, calls=calls, failed=failed):
-                def run(*args):
+                def run(*args, **kwargs):
                     calls.append(name)
                     if name == failed:
                         raise ValueError("secret-value")
@@ -375,6 +539,7 @@ class WorkerTests(WorkerFixture):
                         "prepare_environment": {},
                         "prepare_repository": (self.root, "branch"),
                         "invoke_agent": [],
+                        "review_candidate": ("PASS", []),
                     }.get(name)
 
                 return run
@@ -389,7 +554,12 @@ class WorkerTests(WorkerFixture):
                 )
                 logs = stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
                 self.assertEqual(self.task.main(), 1)
-                self.assertEqual(calls, list(stages[: stages.index(failed) + 1]))
+                expected = list(stages[: stages.index(failed) + 1])
+                if failed in ("verify_review_unchanged", "publish_candidate"):
+                    expected.insert(
+                        expected.index("verify_review_unchanged"), "verify_candidate"
+                    )
+                self.assertEqual(calls, expected)
                 self.assertNotIn("secret-value", logs.getvalue())
                 self.assertNotIn("Verified repository script", logs.getvalue())
 

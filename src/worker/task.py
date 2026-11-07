@@ -244,7 +244,7 @@ def commit_candidate(repository, branch, env, secrets):
     return capture(["git", "rev-parse", "HEAD"], repository, env).strip()
 
 
-# Run fresh read-only review using a new external result file; reject unreliable evidence or required corrections.
+# Run fresh read-only review of the supplied commit; return validated verdict/findings, rejecting unreliable evidence.
 def review_candidate(job, repository, branch, head, env, secrets):
     print("Fresh review of commit " + head, flush=True)
     with tempfile.TemporaryDirectory(
@@ -280,11 +280,11 @@ def review_candidate(job, repository, branch, head, env, secrets):
         except (subprocess.CalledProcessError, OSError) as error:
             raise ReviewError("Reviewer process failed") from error
         verify_review_unchanged(repository, branch, head, env)
-        verdict, findings = read_review_result(result)
+        verdict, findings = read_review_result(result, head)
     print("Review verdict " + verdict + " for commit " + head, flush=True)
     if verdict == "FAIL":
         print(redact(json.dumps(findings), secrets), flush=True)
-        raise ReviewRejected("Review requires corrections")
+    return verdict, findings
 
 
 # Reject review-time changes to the commit, task branch, index, tracked files, or untracked files.
@@ -301,8 +301,17 @@ def verify_review_unchanged(repository, branch, head, env):
 
 
 # Publish the existing reviewed commit once; after ambiguous process exit inspect state instead of retrying.
-def publish_candidate(job, repository, branch, head, env, secrets):
-    prompt = publication_prompt(job, branch, env["PR_TARGET_BRANCH"], head)
+def publish_candidate(
+    job, repository, branch, head, env, secrets, *, review_count=1, addressed=()
+):
+    prompt = publication_prompt(
+        job,
+        branch,
+        env["PR_TARGET_BRANCH"],
+        head,
+        review_count=review_count,
+        addressed=addressed,
+    )
     try:
         invoke_agent(job, repository, branch, env, secrets, prompt=prompt)
     except (subprocess.CalledProcessError, OSError):
@@ -313,7 +322,7 @@ def publish_candidate(job, repository, branch, head, env, secrets):
     verify_completion(job, repository, branch, head, env)
 
 
-# Independently confirm publication of exactly the reviewed commit; no verification rerun after read-only review.
+# Independently confirm publication of exactly the reviewed commit after final verification; reject changed evidence.
 def verify_completion(job, repository, branch, reviewed_head, env):
     print("Independently confirm reviewed publication", flush=True)
     verify_local_candidate(job, repository, branch, reviewed_head, env)
@@ -380,8 +389,48 @@ def execute(job):
     invoke_agent(job, repository, branch, env, secrets)
     verify_candidate(repository, env, secrets)
     head = commit_candidate(repository, branch, env, secrets)
-    review_candidate(job, repository, branch, head, env, secrets)
-    publish_candidate(job, repository, branch, head, env, secrets)
+    addressed = []
+    for review_count in range(1, 4):
+        verdict, findings = review_candidate(
+            job, repository, branch, head, env, secrets
+        )
+        if verdict == "PASS":
+            break
+        if review_count == 3:
+            raise ReviewRejected("Review budget exhausted after three passes")
+        findings = [
+            {key: redact(value, secrets) for key, value in finding.items()}
+            for finding in findings
+        ]
+        invoke_agent(
+            job,
+            repository,
+            branch,
+            env,
+            secrets,
+            prompt=implementation_prompt(
+                job,
+                branch,
+                env["PR_TARGET_BRANCH"],
+                review_head=head,
+                findings=findings,
+            ),
+        )
+        verify_candidate(repository, env, secrets)
+        addressed.append({"candidateHead": head, "findings": findings})
+        head = commit_candidate(repository, branch, env, secrets)
+    verify_candidate(repository, env, secrets)
+    verify_review_unchanged(repository, branch, head, env)
+    publish_candidate(
+        job,
+        repository,
+        branch,
+        head,
+        env,
+        secrets,
+        review_count=review_count,
+        addressed=addressed,
+    )
     print(
         "Verified repository script, nonempty commit, baseline ancestry and one agent-published unmerged PR; fresh review PASS for commit "
         + head

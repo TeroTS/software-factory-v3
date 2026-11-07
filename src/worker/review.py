@@ -4,8 +4,9 @@ import json
 REVIEW_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["verdict", "findings"],
+    "required": ["candidateHead", "verdict", "findings"],
     "properties": {
+        "candidateHead": {"type": "string"},
         "verdict": {"type": "string", "enum": ["PASS", "FAIL"]},
         "findings": {
             "type": "array",
@@ -30,19 +31,25 @@ class ReviewError(ValueError):
     pass
 
 
-# A validated rejection stops this slice; repair is not yet authorized.
+# Exhausting the Job's three validated review passes fails closed without publication or queue release.
 class ReviewRejected(ValueError):
     pass
 
 
 # Read this invocation's result file; validate the fixed schema and verdict consistency before returning findings.
-def read_review_result(result):
+def read_review_result(result, head):
     try:
         review = json.loads(result.read_text())
     except (OSError, ValueError) as error:
         raise ReviewError("Missing or malformed review result") from error
-    if not isinstance(review, dict) or set(review) != {"verdict", "findings"}:
+    if not isinstance(review, dict) or set(review) != {
+        "candidateHead",
+        "verdict",
+        "findings",
+    }:
         raise ReviewError("Invalid review structure")
+    if review["candidateHead"] != head:
+        raise ReviewError("Stale review candidate identity")
     verdict, findings = review["verdict"], review["findings"]
     if verdict not in ("PASS", "FAIL") or not isinstance(findings, list):
         raise ReviewError("Invalid review verdict/findings")
