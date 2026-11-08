@@ -12,7 +12,7 @@ from aws_cdk import aws_iam as iam
 from aws_cdk import aws_stepfunctions as sfn
 
 from src.infra.ingress import create_dispatcher, create_receiver
-from src.infra.workflow import CONNECTOR, definition
+from src.infra.workflow import definition, network_connector
 
 
 # Own the connection and Standard workflow, with an explicit operator-verified version pin.
@@ -62,7 +62,8 @@ class Workflow(Stack):
             iam.PolicyStatement(
                 actions=["lambda:PassNetworkConnector"],
                 resources=[
-                    CONNECTOR + name for name in ("ALL_INGRESS", "INTERNET_EGRESS")
+                    network_connector(self, name)
+                    for name in ("ALL_INGRESS", "INTERNET_EGRESS")
                 ],
             )
         )
@@ -84,7 +85,7 @@ class Workflow(Stack):
                 conditions={
                     "StringEquals": {"states:HTTPMethod": "GET"},
                     "StringLike": {
-                        "states:HTTPEndpoint": "https://*.lambda-microvm.us-east-1.on.aws/status"
+                        "states:HTTPEndpoint": f"https://*.lambda-microvm.{self.region}.on.aws/status"
                     },
                 },
             )

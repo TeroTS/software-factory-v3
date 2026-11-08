@@ -21,14 +21,26 @@ class ImageRuntimeTests(unittest.TestCase):
     def test_image_installs_pinned_docker_for_factory_scripts(self):
         root = Path(__file__).resolve().parents[2]
         dockerfile = (root / "image/Dockerfile").read_text()
-        self.assertIn("docker-29.9.3.tgz", dockerfile)
-        self.assertIn("v5.7.0/docker-compose-linux-aarch64", dockerfile)
+        self.assertIn("ARG DOCKER_VERSION=29.9.3\n", dockerfile)
+        self.assertIn("ARG COMPOSE_VERSION=5.7.0\n", dockerfile)
+        self.assertIn("docker-${DOCKER_VERSION}.tgz", dockerfile)
+        self.assertIn("v${COMPOSE_VERSION}/docker-compose-linux-aarch64", dockerfile)
         self.assertIn("groupadd docker", dockerfile)
         self.assertIn("usermod -aG docker factory", dockerfile)
         self.assertIn("HOME=/home/factory", dockerfile)
         self.assertIn("USER root", dockerfile)
+        self.assertNotIn("AWS_REGION=", dockerfile)
+        self.assertNotIn("AWS_DEFAULT_REGION=", dockerfile)
         self.assertNotIn("compose_experiment", dockerfile)
         self.assertNotIn("compose_probe", dockerfile)
+
+    # Keep Codex's default pin in a build argument used by the actual installation.
+    def test_image_installs_codex_at_build_argument_version(self):
+        dockerfile = (
+            Path(__file__).resolve().parents[2] / "image/Dockerfile"
+        ).read_text()
+        self.assertIn("ARG CODEX_VERSION=0.166.0\n", dockerfile)
+        self.assertIn('"@openai/codex@${CODEX_VERSION}"', dockerfile)
 
     # Static policy is packaged separately from credentials and owned by root in the image.
     def test_image_packages_factory_codex_policy(self):

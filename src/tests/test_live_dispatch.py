@@ -17,7 +17,7 @@ from src.tools import live
 )
 class LiveDispatchTests(unittest.TestCase):
     def setUp(self):
-        self.session = live.operator("AWSAdministratorAccess-172318459814")
+        self.session = live.operator(os.environ.get("AWS_PROFILE"))
         self.name = "factory-dispatch-check-" + uuid.uuid4().hex
         from src.tests.test_workflow import WorkflowFixture, entry_definition
 

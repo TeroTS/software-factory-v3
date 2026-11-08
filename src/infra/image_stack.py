@@ -1,5 +1,6 @@
 # Stage worker/skill sources and define the native image, empty GitHub secret, scoped roles, and retained logs; no AWS lookups.
 import shutil
+import tomllib
 from pathlib import Path
 
 from aws_cdk import (
@@ -15,7 +16,7 @@ from aws_cdk import aws_logs as logs
 from aws_cdk import aws_s3_assets as assets
 from aws_cdk import aws_secretsmanager as secretsmanager
 
-from src.infra.workflow import CONNECTOR
+from src.infra.workflow import network_connector
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -122,7 +123,12 @@ class Image(Stack):
                     resources=[log_group.log_group_arn],
                 )
             )
-        source = assets.Asset(self, "Source", path=stage_source(self.node.root.outdir))
+        source_path = stage_source(self.node.root.outdir)
+        # Use the packaged managed policy as the single model source for runtime and IAM.
+        model = tomllib.loads(
+            (Path(source_path) / "image/managed_config.toml").read_text()
+        )["model"]
+        source = assets.Asset(self, "Source", path=source_path)
         build.add_to_policy(
             iam.PolicyStatement(
                 actions=["s3:GetObject"],
@@ -135,6 +141,7 @@ class Image(Stack):
                 resources=[self.github_secret_arn],
             )
         )
+        # The selected US inference profile routes across these model Regions, independent of deployment Region.
         self.runtime.add_to_policy(
             iam.PolicyStatement(
                 actions=[
@@ -142,12 +149,12 @@ class Image(Stack):
                     "bedrock:InvokeModelWithResponseStream",
                 ],
                 resources=[
-                    f"arn:aws:bedrock:us-east-1:{self.account}:inference-profile/us.openai.gpt-6.1-sol",
+                    f"arn:aws:bedrock:{self.region}:{self.account}:inference-profile/{model}",
                     *[
-                        f"arn:aws:bedrock:{region}::foundation-model/openai.gpt-6.1-sol"
+                        f"arn:aws:bedrock:{region}::foundation-model/{model.removeprefix('us.')}"
                         for region in ("us-east-1", "us-east-2", "us-west-2")
                     ],
-                    f"arn:aws:bedrock:us-east-1:{self.account}:project/default",
+                    f"arn:aws:bedrock:{self.region}:{self.account}:project/default",
                 ],
             )
         )
@@ -155,8 +162,8 @@ class Image(Stack):
             self,
             "Image",
             name="software-factory-poc",
-            description="Worker; Codex 0.166.0, gh 2.103.3, AWS CLI 2.38.0",
-            base_image_arn="arn:aws:lambda:us-east-1:aws:microvm-image:al2023-1",
+            description="Factory worker with Codex, GitHub CLI, AWS CLI and Docker Compose",
+            base_image_arn=f"arn:aws:lambda:{self.region}:aws:microvm-image:al2023-1",
             # Creation accepts a major version; read-back may resolve it to a minor.
             base_image_version="3",
             build_role_arn=build.role_arn,
@@ -168,7 +175,7 @@ class Image(Stack):
                 lambda_.CfnMicrovmImage.ResourcesProperty(minimum_memory_in_mib=2048)
             ],
             additional_os_capabilities=["ALL"],
-            egress_network_connectors=[CONNECTOR + "INTERNET_EGRESS"],
+            egress_network_connectors=[network_connector(self, "INTERNET_EGRESS")],
             logging=lambda_.CfnMicrovmImage.LoggingProperty(
                 cloud_watch=lambda_.CfnMicrovmImage.CloudWatchLoggingProperty(
                     log_group=log_group.log_group_name
@@ -179,6 +186,8 @@ class Image(Stack):
                     key=key, value=value
                 )
                 for key, value in (
+                    ("AWS_REGION", self.region),
+                    ("AWS_DEFAULT_REGION", self.region),
                     ("AUTHORIZED_REPOSITORY", repository.value_as_string),
                     ("PR_TARGET_BRANCH", target.value_as_string),
                     ("GITHUB_SECRET_ARN", self.github_secret_arn),

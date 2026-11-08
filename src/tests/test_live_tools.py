@@ -13,6 +13,26 @@ class LiveToolsTests(unittest.TestCase):
         return importlib.import_module("src.tools." + name)
 
     def setUp(self):
+        environment = patch.dict(
+            "os.environ",
+            {
+                "AWS_ACCOUNT_ID": "111111111111",
+                "AWS_REGION": "eu-west-1",
+                "AWS_PROFILE": "test-operator",
+            },
+        )
+        environment.start()
+        self.addCleanup(environment.stop)
+        live = self.module("live")
+        destination = patch.multiple(
+            live,
+            ACCOUNT="111111111111",
+            REGION="eu-west-1",
+            IMAGE_ARN="arn:aws:lambda:eu-west-1:111111111111:microvm-image:software-factory-poc",
+            MACHINE_ARN="arn:aws:states:eu-west-1:111111111111:stateMachine:software-factory-poc",
+        )
+        destination.start()
+        self.addCleanup(destination.stop)
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.job = {
@@ -22,7 +42,9 @@ class LiveToolsTests(unittest.TestCase):
         }
         self.job_file = Path(self.directory.name) / "job.json"
         self.job_file.write_text(json.dumps([self.job]))
-        self.arn = "arn:aws:states:us-east-1:172318459814:execution:software-factory-poc:fixed-name"
+        self.arn = (
+            live.MACHINE_ARN.replace(":stateMachine:", ":execution:") + ":fixed-name"
+        )
         self.output = {
             "microvmId": "microvm-test",
             "status": "ok",
@@ -65,6 +87,40 @@ class LiveToolsTests(unittest.TestCase):
                     },
                 ]
             )
+
+    # Fresh processes read destination/profile from the environment, not cached test module settings.
+    def test_live_configuration_is_environment_driven(self):
+        import subprocess
+        import sys
+
+        subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "from src.tools import live; "
+                    "assert live.ACCOUNT == '111111111111'; "
+                    "assert live.REGION == 'eu-west-1'; "
+                    "assert live.IMAGE_ARN == 'arn:aws:lambda:eu-west-1:111111111111:microvm-image:software-factory-poc'; "
+                    "assert live.parser('test').parse_args([]).profile == 'test-operator'"
+                ),
+            ],
+            check=True,
+        )
+        live = self.module("live")
+        for account, region in (
+            ("", "eu-west-1"),
+            ("invalid", "eu-west-1"),
+            ("111111111111", ""),
+        ):
+            with (
+                self.subTest(account=account, region=region),
+                patch.multiple(live, ACCOUNT=account, REGION=region),
+                patch.object(live.boto3, "Session") as session,
+                self.assertRaisesRegex(ValueError, "AWS_ACCOUNT_ID.*AWS_REGION"),
+            ):
+                live.operator("test-operator")
+            session.assert_not_called()
 
     def test_image_validation_precedes_review_and_deployment(self):
         module = self.module("validate_deploy_image")
@@ -286,6 +342,9 @@ class LiveToolsTests(unittest.TestCase):
         )
         self.assertNotIn("local-secret", output.getvalue())
         self.assertNotIn("local-secret", str(run.call_args.args))
+        self.assertEqual(run.call_args.kwargs["env"]["AWS_ACCOUNT_ID"], "111111111111")
+        self.assertEqual(run.call_args.kwargs["env"]["AWS_REGION"], "eu-west-1")
+        self.assertEqual(run.call_args.kwargs["env"]["AWS_DEFAULT_REGION"], "eu-west-1")
         self.assertEqual(
             run.call_args.kwargs["env"]["AWS_SECRET_ACCESS_KEY"], "local-secret"
         )
@@ -708,12 +767,13 @@ class LiveToolsTests(unittest.TestCase):
         from botocore.stub import Stubber
 
         live = self.module("live")
-        client = boto3.client(
-            "sts",
-            region_name="us-east-1",
-            aws_access_key_id="testing",
-            aws_secret_access_key="testing",
-        )
+        with patch.dict("os.environ", {}, clear=True):
+            client = boto3.Session().client(
+                "sts",
+                region_name="us-east-1",
+                aws_access_key_id="testing",
+                aws_secret_access_key="testing",
+            )
         response = {
             "Account": "172318459814",
             "Arn": "arn:aws:iam::172318459814:user/test",

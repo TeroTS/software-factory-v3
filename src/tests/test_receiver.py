@@ -19,6 +19,7 @@ class ReceiverTests(unittest.TestCase):
             os.environ,
             {
                 "WEBHOOK_SECRET": "signing-secret",
+                "AWS_REGION": "eu-west-1",
                 "AUTHORIZED_REPOSITORY": "example/project",
                 "PR_TARGET_BRANCH": "release/next",
                 "JOB_TABLE_NAME": "jobs",
@@ -50,7 +51,7 @@ class ReceiverTests(unittest.TestCase):
             "dynamodb": self.table,
         }[service]
         session = patch("src.receiver.handler.boto3.Session", return_value=self.session)
-        session.start()
+        self.session_factory = session.start()
         self.addCleanup(session.stop)
         self.connection = Mock()
         self.connection.getresponse.return_value.status = 200
@@ -82,6 +83,7 @@ class ReceiverTests(unittest.TestCase):
     def test_signed_receipt_stores_bounded_pinned_payload(self):
         result = handle(self.event(binary=True), None)
         self.assertEqual(result["statusCode"], 202)
+        self.session_factory.assert_called_once_with(region_name="eu-west-1")
         request = self.table.put_item.call_args.kwargs
         self.assertEqual(request["TableName"], "jobs")
         item = request["Item"]

@@ -1,4 +1,5 @@
 import json
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -121,9 +122,68 @@ class InfrastructureTests(unittest.TestCase):
         from src.infra.app import main
 
         entry = Path(self.directory.name) / "entry"
-        with patch("src.infra.app.App", return_value=App(outdir=str(entry))):
+        with (
+            patch.dict(
+                "os.environ",
+                {"AWS_ACCOUNT_ID": "111111111111", "AWS_REGION": "eu-west-1"},
+            ),
+            patch("src.infra.app.App", return_value=App(outdir=str(entry))),
+        ):
             main()
-        self.assertTrue((entry / "manifest.json").is_file())
+        manifest = json.loads((entry / "manifest.json").read_text())
+        for name in ("FactoryArtifacts", "FactoryImage", "FactoryWorkflow"):
+            self.assertEqual(
+                manifest["artifacts"][name]["environment"],
+                "aws://111111111111/eu-west-1",
+            )
+
+    # Derive regional resources and worker settings from the stack, retaining model routing permissions.
+    def test_resources_follow_the_selected_account_and_region(self):
+        from src.infra.artifacts_stack import Artifacts
+        from src.infra.image_stack import Image
+        from src.infra.workflow_stack import Workflow
+
+        app = App(outdir=str(Path(self.directory.name) / "regional"))
+        env = Environment(account="111111111111", region="eu-west-1")
+        artifacts = Artifacts(app, "RegionalArtifacts", env=env)
+        image = Image(
+            app, "RegionalImage", artifact_bucket=artifacts.bucket_name, env=env
+        )
+        workflow = Workflow(app, "RegionalWorkflow", image=image, env=env)
+        image_template = Template.from_stack(image).to_json()
+        properties = image_template["Resources"]["Image"]["Properties"]
+        connector = (
+            "arn:aws:lambda:eu-west-1:aws:network-connector:aws-network-connector:"
+        )
+        self.assertEqual(
+            properties["BaseImageArn"],
+            "arn:aws:lambda:eu-west-1:aws:microvm-image:al2023-1",
+        )
+        self.assertEqual(
+            properties["EgressNetworkConnectors"], [connector + "INTERNET_EGRESS"]
+        )
+        variables = {v["Key"]: v["Value"] for v in properties["EnvironmentVariables"]}
+        self.assertEqual(variables["AWS_REGION"], "eu-west-1")
+        self.assertEqual(variables["AWS_DEFAULT_REGION"], "eu-west-1")
+        launch = workflow.node.find_child("LaunchVM").to_state_json()["Parameters"]
+        self.assertEqual(
+            launch["IngressNetworkConnectors"], [connector + "ALL_INGRESS"]
+        )
+        self.assertEqual(
+            launch["EgressNetworkConnectors"], [connector + "INTERNET_EGRESS"]
+        )
+        policy = json.dumps(Template.from_stack(workflow).to_json())
+        self.assertIn("https://*.lambda-microvm.eu-west-1.on.aws/status", policy)
+        self.assertNotIn("172318459814", json.dumps(image_template) + policy)
+        permissions = json.dumps(image_template)
+        self.assertIn(
+            "arn:aws:bedrock:eu-west-1:111111111111:inference-profile/", permissions
+        )
+        self.assertIn(
+            "arn:aws:bedrock:eu-west-1:111111111111:project/default", permissions
+        )
+        for region in ("us-east-1", "us-east-2", "us-west-2"):
+            self.assertIn(f"arn:aws:bedrock:{region}::foundation-model/", permissions)
 
     def test_signed_webhook_and_stream_dispatch_reuse_standard_workflow(self):
         template = self.workflow_template
@@ -572,6 +632,62 @@ class InfrastructureTests(unittest.TestCase):
             self.assertIn(action, text)
         self.assertNotIn("AdministratorAccess", text)
         self.assertNotIn("states:GetExecutionHistory", text)
+
+    # Keep IAM resources aligned with the staged managed policy, without version metadata to maintain.
+    def test_image_model_permissions_follow_managed_policy(self):
+        from src.infra.image_stack import ROOT, Image, stage_source
+
+        root = Path(stage_source(Path(self.directory.name) / "model-source"))
+        shutil.copyfile(ROOT / "image/Dockerfile", root / "image/Dockerfile")
+        policy = root / "image/managed_config.toml"
+        policy.write_text(
+            policy.read_text().replace(
+                "us.openai.gpt-6.1-sol", "us.openai.fixture-model"
+            )
+        )
+        app = App(outdir=str(Path(self.directory.name) / "model-app"))
+        with patch("src.infra.image_stack.ROOT", root):
+            image = Image(
+                app,
+                "ModelImage",
+                artifact_bucket=self.artifacts.bucket_name,
+                env=Environment(account="111111111111", region="us-east-1"),
+            )
+        template = Template.from_stack(image)
+        statements = [
+            statement
+            for resource in template.find_resources("AWS::IAM::Policy").values()
+            for statement in resource["Properties"]["PolicyDocument"]["Statement"]
+        ]
+        inference = next(s for s in statements if "bedrock:InvokeModel" in s["Action"])
+        self.assertEqual(
+            set(inference["Resource"]),
+            {
+                "arn:aws:bedrock:us-east-1:111111111111:inference-profile/us.openai.fixture-model",
+                "arn:aws:bedrock:us-east-1:111111111111:project/default",
+                *{
+                    f"arn:aws:bedrock:{region}::foundation-model/openai.fixture-model"
+                    for region in ("us-east-1", "us-east-2", "us-west-2")
+                },
+            },
+        )
+        description = template.to_json()["Resources"]["Image"]["Properties"][
+            "Description"
+        ]
+        self.assertNotRegex(description, r"\d+\.\d+")
+        self.assertEqual(
+            (Path(app.outdir) / "factory-source/image/managed_config.toml").read_text(),
+            policy.read_text(),
+        )
+        policy.write_text("model_provider = 'amazon-bedrock-runtime'\n")
+        failed_app = App(outdir=str(Path(self.directory.name) / "missing-model"))
+        with patch("src.infra.image_stack.ROOT", root), self.assertRaises(KeyError):
+            Image(
+                failed_app,
+                "MissingModelImage",
+                artifact_bucket=self.artifacts.bucket_name,
+                env=Environment(account="111111111111", region="us-east-1"),
+            )
 
     # Checks Lambda role trust and restricts runtime access to the stack-owned token
     # and approved model resources; credentials remain outside synthesized templates.

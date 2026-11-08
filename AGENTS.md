@@ -54,8 +54,9 @@ make floci-down
 ```
 
 Deployment, live inference, and GitHub writes require separate authorization;
-local verification does not require credentials. See `docs/running.md` before
-using live tools.
+local verification does not require credentials. Synthesis requires explicit
+`AWS_ACCOUNT_ID` / `AWS_REGION`; live tools require `AWS_PROFILE` or `--profile`
+and verify the authenticated account. See `docs/running.md` before using live tools.
 
 ## Agent skills
 

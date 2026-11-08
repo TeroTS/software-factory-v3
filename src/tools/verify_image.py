@@ -1,6 +1,8 @@
 # Read back the exact new image artifact/version before pinning; never create/update or launch.
 import argparse
 import json
+import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -32,25 +34,35 @@ def main():
         description="Read-only verification of the newly deployed CDK image"
     )
     parser.add_argument("--version", required=True)
-    parser.add_argument("--profile", default="AWSAdministratorAccess-172318459814")
+    parser.add_argument(
+        "--profile",
+        default=os.environ.get("AWS_PROFILE"),
+        required=not bool(os.environ.get("AWS_PROFILE")),
+    )
     parser.add_argument(
         "--template", type=Path, default=Path("cdk.out/FactoryImage.template.json")
     )
     args = parser.parse_args()
+    account = os.environ.get("AWS_ACCOUNT_ID", "")
+    region = os.environ.get("AWS_REGION", "")
+    if not re.fullmatch(r"[0-9]{12}", account) or not region.strip():
+        parser.error(
+            "Set AWS_ACCOUNT_ID (12 digits) and AWS_REGION before verification"
+        )
     template = json.loads(args.template.read_text())
     properties = next(
         value["Properties"]
         for value in template["Resources"].values()
         if value["Type"] == "AWS::Lambda::MicrovmImage"
     )
-    arn = "arn:aws:lambda:us-east-1:172318459814:microvm-image:" + properties["Name"]
+    arn = f"arn:aws:lambda:{region}:{account}:microvm-image:" + properties["Name"]
     common = [
         "--image-identifier",
         arn,
         "--profile",
         args.profile,
         "--region",
-        "us-east-1",
+        region,
         "--output",
         "json",
     ]

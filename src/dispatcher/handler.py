@@ -1,6 +1,7 @@
 # Dispatch one claimed Job with a persisted latest-target baseline; failures block later Jobs and never expose payloads or credentials.
 import http.client
 import json
+import logging
 import os
 from contextlib import closing
 
@@ -10,12 +11,14 @@ from botocore.exceptions import BotoCoreError, ClientError
 
 from src.utils.job_utils import AWS_CONFIG, load_config, resolve_baseline
 
+logger = logging.getLogger(__name__)
+
 
 # Claim the oldest returned pending Job, persist its latest configured target SHA, then start one workflow; failures retain the claim.
 def handle(event, context):
     table = os.environ["JOB_TABLE_NAME"]
     machine = os.environ["STATE_MACHINE_ARN"]
-    session = boto3.Session(region_name=os.environ.get("AWS_REGION", "us-east-1"))
+    session = boto3.Session(region_name=os.environ.get("AWS_REGION"))
     with closing(session.client("dynamodb", config=AWS_CONFIG)) as client:
         query = {
             "TableName": table,
@@ -48,14 +51,17 @@ def handle(event, context):
             ExpressionAttributeNames={"#status": "status"},
             ExpressionAttributeValues={":status": {"S": "IN_PROGRESS"}},
         )
+        stage = "validation"
         try:
             config = load_config()
             job = TypeDeserializer().deserialize(item["job"])
             if config is None or job["repository"] != config["repository"]:
                 raise ValueError("Invalid deployment configuration or repository")
+            stage = "baseline_resolution"
             baseline = resolve_baseline(session, config)
             if baseline is None:
                 raise ValueError("Unresolved execution baseline")
+            stage = "baseline_persistence"
             client.update_item(
                 TableName=table,
                 Key=key,
@@ -71,7 +77,12 @@ def handle(event, context):
             TypeError,
             AttributeError,
             KeyError,
-        ):
+        ) as error:
+            logger.error(
+                "Queued Job baseline preparation failed: stage=%s error_type=%s",
+                stage,
+                type(error).__name__,
+            )
             raise RuntimeError("Queued Job baseline preparation failed") from None
     deserialize = TypeDeserializer().deserialize
     job["baseSha"] = baseline
@@ -90,5 +101,9 @@ def handle(event, context):
                     separators=(",", ":"),
                 ),
             )
-    except (BotoCoreError, ClientError, OSError, ValueError, TypeError):
+    except (BotoCoreError, ClientError, OSError, ValueError, TypeError) as error:
+        logger.error(
+            "Queued Job workflow start unconfirmed: stage=workflow_submission error_type=%s",
+            type(error).__name__,
+        )
         raise RuntimeError("Queued Job workflow start unconfirmed") from None

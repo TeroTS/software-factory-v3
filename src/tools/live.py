@@ -2,6 +2,7 @@
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from contextlib import closing
@@ -14,8 +15,8 @@ from botocore.exceptions import ClientError
 from src.tools.verify_image import verify
 
 ROOT = Path(__file__).resolve().parents[2]
-ACCOUNT = "172318459814"
-REGION = "us-east-1"
+ACCOUNT = os.environ.get("AWS_ACCOUNT_ID", "")
+REGION = os.environ.get("AWS_REGION", "")
 IMAGE_ARN = f"arn:aws:lambda:{REGION}:{ACCOUNT}:microvm-image:software-factory-poc"
 MACHINE_ARN = f"arn:aws:states:{REGION}:{ACCOUNT}:stateMachine:software-factory-poc"
 LOG_GROUP = "/aws/lambda-microvms/software-factory-poc"
@@ -30,12 +31,20 @@ class OperatorError(ValueError):
 # Add the existing operator profile option to one independently invoked script.
 def parser(description):
     result = argparse.ArgumentParser(description=description)
-    result.add_argument("--profile", default="AWSAdministratorAccess-172318459814")
+    result.add_argument(
+        "--profile",
+        default=os.environ.get("AWS_PROFILE"),
+        required=not bool(os.environ.get("AWS_PROFILE")),
+    )
     return result
 
 
-# Authenticate the fixed account before allowing any deployment or Job action.
+# Require an explicit destination and authenticate its account before deployment or Job actions.
 def operator(profile):
+    if not re.fullmatch(r"[0-9]{12}", ACCOUNT) or not REGION.strip():
+        raise OperatorError(
+            "Set AWS_ACCOUNT_ID (12 digits) and AWS_REGION before live actions"
+        )
     session = boto3.Session(profile_name=profile, region_name=REGION)
     if aws(session, "sts", "get_caller_identity")["Account"] != ACCOUNT:
         raise OperatorError("Wrong operator account; refusing live actions")
@@ -98,6 +107,7 @@ def cdk(session, *arguments):
     credentials = session.get_credentials().get_frozen_credentials()
     env = {
         **os.environ,
+        "AWS_ACCOUNT_ID": ACCOUNT,
         "AWS_REGION": REGION,
         "AWS_DEFAULT_REGION": REGION,
         "AWS_PAGER": "",

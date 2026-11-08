@@ -1,9 +1,12 @@
 # Run one job on a VM using the configured image version; keep tokens out of the final result.
-from aws_cdk import Duration
+from aws_cdk import Duration, Stack
 from aws_cdk import aws_stepfunctions as sfn
 from aws_cdk import aws_stepfunctions_tasks as tasks
 
-CONNECTOR = "arn:aws:lambda:us-east-1:aws:network-connector:aws-network-connector:"
+
+# Resolve a managed network connector in the supplied construct's deployment Region.
+def network_connector(scope, name):
+    return f"arn:aws:lambda:{Stack.of(scope).region}:aws:network-connector:aws-network-connector:{name}"
 
 
 # Create an AWS call that saves its reply at result and can access only image_arn.
@@ -101,8 +104,8 @@ def definition(
             "ExecutionRoleArn": runtime_role,
             "ClientToken.$": "$$.Execution.Name",
             "RunHookPayload.$": "States.JsonToString($.job)",
-            "IngressNetworkConnectors": [CONNECTOR + "ALL_INGRESS"],
-            "EgressNetworkConnectors": [CONNECTOR + "INTERNET_EGRESS"],
+            "IngressNetworkConnectors": [network_connector(scope, "ALL_INGRESS")],
+            "EgressNetworkConnectors": [network_connector(scope, "INTERNET_EGRESS")],
             "Logging": {"CloudWatch": {"LogGroup": log_group}},
             "MaximumDurationInSeconds": 1800,
             "IdlePolicy": {

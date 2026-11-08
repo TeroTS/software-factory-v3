@@ -78,14 +78,7 @@ def _prepare_job(body, event_type, repository):
         task = title + ("\n\n" + text if text else "")
         # Reserve the full SHA's space before lookup; preserve the worker's 16 KiB payload limit.
         job = {"repository": repository, "baseSha": "0" * 40, "task": task}
-        if (
-            len(
-                json.dumps(job, ensure_ascii=False, separators=(",", ":")).encode(
-                    "utf-8"
-                )
-            )
-            > 16384
-        ):
+        if len(json.dumps(job, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > 16384:
             return None, response(400, "Job too large")
     except (ValueError, UnicodeError):
         return None, response(400, "Invalid issue payload")
@@ -125,7 +118,7 @@ def handle(event, context):
     if error is not None:
         return error
     session = boto3.Session(
-        region_name=os.environ.get("AWS_REGION", "us-east-1"),
+        region_name=os.environ.get("AWS_REGION"),
         **(
             {"aws_access_key_id": "test", "aws_secret_access_key": "test"}
             if config["local"]

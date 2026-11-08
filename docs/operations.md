@@ -15,11 +15,18 @@ execution without credentials/inference. Runtime `run` alone starts work.
 | `ImageVersion` | Required workflow CDK parameter, explicit `major.minor` verified pin. |
 | `WebhookSigningSecret` | NoEcho workflow parameter supplied privately; receiver receives `WEBHOOK_SECRET`. |
 | `JOB_TABLE_NAME`, `STATE_MACHINE_ARN` | Infrastructure supplies queue/workflow identities to ingress components. |
-| `WORKSPACE`, AWS Region | Image/runtime settings; workspace defaults to `/workspace`. |
+| `AWS_ACCOUNT_ID`, `AWS_REGION`, `AWS_PROFILE` | Operator environment selects deployment account/Region and profile; live tools also accept `--profile`. Account/Region have no fixed defaults. CDK supplies the image's runtime Region; ingress Lambdas use AWS's runtime Region. |
+| `WORKSPACE` | Image/runtime setting; defaults to `/workspace`. |
 | Model, sandbox, approval settings | Root-owned [managed Codex policy](../image/managed_config.toml): pinned Bedrock model, workspace-write/network access, never interactive approval, web search disabled. |
 
 [Image](../src/infra/image_stack.py), [workflow stack](../src/infra/workflow_stack.py),
 and [ingress](../src/infra/ingress.py) are the configuration authority.
+IAM model ARNs are derived from the packaged managed policy, keeping permissions
+aligned with the worker's selected model. The selected US inference profile retains
+an explicit model-routing IAM allowlist (`us-east-1`, `us-east-2`, `us-west-2`),
+independent of deployment Region.
+Review that list when changing the model/profile; configurable deployment does
+not imply the services or profile are available in every Region.
 `LOCAL_AWS_ENDPOINT` / `LOCAL_GITHUB_ENDPOINT` are paired fixed test-fixture
 settings accepted by shared ingress utilities, not production endpoints. The
 local dispatcher fixture supplies its AWS SDK endpoint separately.

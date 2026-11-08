@@ -14,6 +14,7 @@ class DispatcherTests(unittest.TestCase):
             {
                 "PATH": os.environ["PATH"],
                 "JOB_TABLE_NAME": "jobs",
+                "AWS_REGION": "eu-west-1",
                 "STATE_MACHINE_ARN": "machine",
                 "AUTHORIZED_REPOSITORY": "example/project",
                 "PR_TARGET_BRANCH": "release/next",
@@ -43,7 +44,7 @@ class DispatcherTests(unittest.TestCase):
             "secretsmanager": self.secrets,
         }[service]
         session = patch("boto3.Session", return_value=self.session)
-        session.start()
+        self.session_factory = session.start()
         self.addCleanup(session.stop)
         self.job = {
             "repository": "example/project",
@@ -109,6 +110,7 @@ class DispatcherTests(unittest.TestCase):
         self.machine.start_execution.side_effect = started
         self.invoke([{"newest": True}, {"unrelated": True}, {}])
         self.machine.start_execution.assert_called_once()
+        self.session_factory.assert_called_once_with(region_name="eu-west-1")
         self.assertEqual(self.items, before)
         update = self.table.update_item.call_args_list[0].kwargs
         self.assertEqual(
@@ -262,8 +264,33 @@ class DispatcherTests(unittest.TestCase):
                     if failure == "start"
                     else None
                 )
-                with self.assertRaises(RuntimeError) as raised:
+                with (
+                    self.assertLogs("src.dispatcher.handler", level="ERROR") as logs,
+                    self.assertRaises(RuntimeError) as raised,
+                ):
                     self.invoke([{}])
+                stage = {
+                    "missing-sha": "baseline_resolution",
+                    "resolution": "baseline_resolution",
+                    "persistence": "baseline_persistence",
+                    "start": "workflow_submission",
+                }[failure]
+                error_type = "ValueError" if failure == "missing-sha" else "OSError"
+                message = (
+                    "Queued Job workflow start unconfirmed"
+                    if failure == "start"
+                    else "Queued Job baseline preparation failed"
+                )
+                self.assertEqual(
+                    logs.output,
+                    [
+                        (
+                            f"ERROR:src.dispatcher.handler:{message}: "
+                            f"stage={stage} error_type={error_type}"
+                        )
+                    ],
+                )
+                self.assertIsNone(logs.records[0].exc_info)
                 self.assertNotIn("github_pat_private", str(raised.exception))
                 self.assertTrue(raised.exception.__suppress_context__)
                 self.assertEqual(
@@ -293,8 +320,20 @@ class DispatcherTests(unittest.TestCase):
             ):
                 self.table.reset_mock()
                 self.table.query.side_effect = [{"Items": []}, {"Items": self.items}]
-                with self.assertRaises(RuntimeError):
+                with (
+                    self.assertLogs("src.dispatcher.handler", level="ERROR") as logs,
+                    self.assertRaises(RuntimeError),
+                ):
                     self.invoke([{}])
+                self.assertEqual(
+                    logs.output,
+                    [
+                        (
+                            "ERROR:src.dispatcher.handler:Queued Job baseline preparation "
+                            "failed: stage=validation error_type=ValueError"
+                        )
+                    ],
+                )
                 self.table.update_item.assert_called_once()
                 self.secrets.get_secret_value.assert_not_called()
                 self.connection.request.assert_not_called()
@@ -319,8 +358,21 @@ class DispatcherTests(unittest.TestCase):
         self.table.update_item.side_effect = None
         self.table.query.side_effect = [{"Items": []}, {"Items": self.items}]
         self.machine.start_execution.side_effect = error
-        with self.assertRaises(RuntimeError):
+        with (
+            self.assertLogs("src.dispatcher.handler", level="ERROR") as logs,
+            self.assertRaises(RuntimeError),
+        ):
             self.invoke([{}])
+        self.assertEqual(
+            logs.output,
+            [
+                (
+                    "ERROR:src.dispatcher.handler:Queued Job workflow start unconfirmed: "
+                    "stage=workflow_submission error_type=ClientError"
+                )
+            ],
+        )
+        self.assertIsNone(logs.records[0].exc_info)
         self.assertEqual(self.table.update_item.call_count, 3)
         self.machine.start_execution.assert_called_once()
 

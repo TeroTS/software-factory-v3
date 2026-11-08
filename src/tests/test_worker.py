@@ -111,6 +111,7 @@ class WorkerFixture(unittest.TestCase):
             **os.environ,
             "WORKSPACE": str(workspace or self.root / "workspace"),
             "GITHUB_SECRET_ARN": "secret-arn",
+            "AWS_REGION": "eu-west-1",
             "AUTHORIZED_REPOSITORY": "example/authorized-project",
             "PR_TARGET_BRANCH": "release",
             "GIT_CONFIG_GLOBAL": os.devnull,
@@ -652,6 +653,8 @@ class WorkerTests(WorkerFixture):
         ):
             secrets = []
             env = self.task.prepare_environment(secrets)
+            self.assertEqual(env["AWS_REGION"], "eu-west-1")
+            self.assertEqual(env["AWS_DEFAULT_REGION"], "eu-west-1")
             self.task.logged(["./scripts/verify"], self.origin, env, secrets)
         self.assertEqual(
             [call.args[0] for call in self.client_mock.call_args_list],
@@ -663,6 +666,13 @@ class WorkerTests(WorkerFixture):
         self.assertNotIn("synthetic-access", logs.getvalue())
         self.assertNotIn("secret-access", logs.getvalue())
         self.assertNotIn("session-token", logs.getvalue())
+
+    # Missing deployment Region fails before credential discovery or repository-token access.
+    def test_missing_region_stops_before_credentials(self):
+        with patch.dict(os.environ, {}, clear=True), self.assertRaises(KeyError):
+            self.task.prepare_environment([])
+        self.sdk_credentials.assert_not_called()
+        self.client_mock.assert_not_called()
 
     # Stops at each failed stage without leaking its exception.
     def test_stage_failures_stop_coordination_and_final_success(self):

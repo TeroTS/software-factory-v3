@@ -9,12 +9,24 @@ CDK CLI. Runtime images and ingress Lambdas use Python 3.13.
 ```sh
 make setup
 make verify
-make synth
 ```
 
 `make verify` runs Ruff format/lint checks, unittest through branch coverage, and
 the logging smoke check. `make synth` produces local templates/assets without
 AWS lookups or deployment. `make dev` is only a logging check, not a server.
+
+Before synthesis, set `AWS_ACCOUNT_ID` to the target's 12-digit account ID and
+`AWS_REGION` to the deployment Region; neither has a fixed default:
+
+```sh
+export AWS_ACCOUNT_ID="<target-account-id>"
+export AWS_REGION="<deployment-region>"
+make synth
+```
+
+For offline review, synthetic account/Region values are sufficient; credentials
+are not required. MicroVMs and the configured Bedrock inference profile must be
+available in the selected Region before deployment.
 
 | Command | Purpose |
 | --- | --- |
@@ -49,10 +61,13 @@ disable Codex's own sandbox to make the check pass.
 
 These commands are documented for separately authorized use, not part of local
 verification. They authenticate the configured AWS account, inspect current
-source/deployment, and prompt before deployment or a new billable Job. The fixed
-account/Region and default profile are in [live tools](../src/tools/live.py).
+source/deployment, and prompt before deployment or a new billable Job. They use
+the same `AWS_ACCOUNT_ID` / `AWS_REGION` as synthesis and verify the authenticated
+account matches the configured target before live actions. Set `AWS_PROFILE` to
+your operator profile, or pass `--profile` explicitly to each command:
 
 ```sh
+export AWS_PROFILE="<operator-profile>"
 uv run --locked python -m src.tools.validate_deploy_image
 # Set IMAGE_VERSION to the verified SUCCESSFUL/ACTIVE version printed above.
 uv run --locked python -m src.tools.deploy_infra --version "$IMAGE_VERSION"

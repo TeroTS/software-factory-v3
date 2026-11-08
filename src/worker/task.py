@@ -113,8 +113,7 @@ def run_agent(args, prompt, cwd, env, secrets):
 def prepare_environment(secrets):
     env = {
         **os.environ,
-        "AWS_REGION": "us-east-1",
-        "AWS_DEFAULT_REGION": "us-east-1",
+        "AWS_DEFAULT_REGION": os.environ["AWS_REGION"],
         "PYTHONDONTWRITEBYTECODE": "1",
     }
     session = boto3.Session(region_name=env["AWS_REGION"])

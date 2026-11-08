@@ -38,7 +38,7 @@ checks Python formatting, lint, tests through coverage, and logging.
 | `make coverage` | Run tests with branch coverage and report missing lines. |
 | `make dev` | Run the local logging smoke check; not an application server. |
 | `make verify` | Run formatting checks, lint, coverage/tests, and logging. |
-| `make synth` | Synthesize native CDK templates/assets locally; no deployment. |
+| `make synth` | Synthesize native CDK templates/assets locally; requires `AWS_ACCOUNT_ID` and `AWS_REGION`, not credentials or deployment. |
 | `make preflight` | Build the ARM64 image and check real sandbox/search/edit/tests/Git plus simulated-service worker/lifecycle tests. |
 | `make floci-test` | Run local signed-webhook, DynamoDB/Streams dispatch, and Standard entry-state tests with simulated VM lifecycle tasks; requires Docker. |
 | `make floci-down` | Stop the task-local emulator and GitHub fixture containers. |
@@ -54,8 +54,6 @@ Follow [running and verification](docs/running.md) for deployment prerequisites,
 private webhook configuration, direct-test preparation, and interrupted-run
 handling; direct tests must not overlap queued work.
 
-- [AWS deployment and live-test plan](docs/plans/aws-deployment-happy-path.md):
-  proposed deployment gates and one direct GitHub happy-path test.
 - [Architecture](docs/architecture.md): components, queueing, and runtime flows.
 - [Operations](docs/operations.md): configuration, trust, logs, and failure limits.
 - [Interface contracts](docs/contracts.md) and [OpenAPI](openapi.yaml): submission
